@@ -86,31 +86,50 @@ def train(model, train_data, train_args, tokenizer, trainer_API=False):
                 attention_mask = batch['attention_mask'].to(device)
                 outputs = model(input)
 
+def evaluate(data, labels, model, tokenizer):
+    seqs = []
+    labels_copy = list(set([x for y in labels.copy() for x in y.split()]))
+    labels_copy.remove('O')
+    for txt, lab in zip(data, labels):
+        masked_sequence = f" ".join([tokenizer.mask_token if j in labels_copy else i for i,j in zip(txt.split(), lab.split())])
+        seqs.append(masked_sequence)
+        input = tokenizer.encode(masked_sequence, return_tensors="pt")
+        mask_token_index = torch.where(input == tokenizer.mask_token_id)[1]
+        logits = model(input)[0]
+        if tokenizer.mask_token in masked_sequence:
+            for mask in mask_token_index:
+                mask = torch.unsqueeze(mask, 0)
+                print(txt)
+                print(masked_sequence)
+                mask_token_logits = logits[0, mask, :]
+                top_5_tokens = torch.topk(mask_token_logits, 5, dim=1).indices[0].tolist()
+                print(masked_sequence.replace(tokenizer.mask_token, tokenizer.decode([top_5_tokens[0]])))
+
 def main(args):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     parser = HfArgumentParser(TrainingArguments)
     train_args, = parser.parse_args_into_dataclasses()
-    # print('\n\n',len(train_args),'\n\n')
+    tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
+    model = AutoModelForMaskedLM.from_pretrained(args.pretrained_model)
+
     if train_args.do_train:
-        tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
-        model = AutoModelForMaskedLM.from_pretrained(args.pretrained_model)
         model.to(device)
         train_data, train_data_labels = prepare_data.read_outcome_data_to_sentences(args.data+'train.txt')
         train_data = train_data[:20]
         train_tokenized_input = tokenize(train_data, tokenizer)
         train_data = Outcome_Dataset(train_tokenized_input)
         print(train_data)
-        # train_loader = DataLoader(train_data, batch_size=16)
         train(model=model, train_data=train_data, train_args=train_args, tokenizer=tokenizer, trainer_API=True)
 
-    if args.do_eval:
+    if train_args.do_eval:
         eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(args.data+'dev.txt')
-        eval_tokenized_input = tokenize(eval_data)
+        evaluate(data=eval_data, labels=eval_data_labels, model=model, tokenizer=tokenizer)
 
 if __name__ == '__main__':
     par = ArgumentParser()
     par.add_argument('--data', default='data/ebm-comet/', help='source of data')
     par.add_argument('--do_train', action='store_true', help='call if you want to fine-tune pretrained model on dataset')
+    par.add_argument('--do_eval', action='store_true', help='call if you want to evaluate a fine-tuned pretrained model on validation dataset')
     par.add_argument('--output_dir', default='output', help='indicate where you want model and results to be stored')
     par.add_argument('--pretrained_model', default='dmis-lab/biobert-v1.1', help='pre-trained model available via hugging face')
     par.add_argument('--per_device_train_batch_size', default=8, help='training batch size')
