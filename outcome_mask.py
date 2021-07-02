@@ -75,7 +75,7 @@ def train(model, train_data, eval_data, train_args, tokenizer, trainer_API=False
             data_collator=data_collator,
             tokenizer=tokenizer,
         )
-        train_result = trainer.train()
+        train_result = trainer.train() if train_args.resume_from_checkpoint is None else trainer.train(resume_from_checkpoint=train_args.resume_from_checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
         metrics = train_result.metrics
         metrics["train_samples"] = len(train_data)
@@ -90,7 +90,7 @@ def train(model, train_data, eval_data, train_args, tokenizer, trainer_API=False
                 perplexity = math.exp(eval_results["eval_loss"])
             except OverflowError:
                 perplexity = float("inf")
-            metrics["perplexity"] = perplexity
+            eval_results["perplexity"] = perplexity
             trainer.log_metrics("eval", eval_results)
             trainer.save_metrics("eval", eval_results)
     else:
@@ -117,20 +117,21 @@ def evaluate(data, labels, train_args, model, tokenizer):
             logits = model(input)[0]
             if tokenizer.mask_token in masked_sequence:
                 top_3_token_predictions = []
-                print(txt, '\n', masked_sequence, '\n')
-                fact.write(txt + '\n')
+                # print(txt, '\n', masked_sequence, '\n')
+                fact.write(txt+'\n')
                 for mask in mask_token_index:
                     mask = torch.unsqueeze(mask, 0)
                     mask_token_logits = logits[0, mask, :]
                     top_3_tokens = torch.topk(mask_token_logits, 3, dim=1).indices[0].tolist()
                     top_3_token_predictions.append(top_3_tokens)
-
+                fact.write(str(masked_sequence)+'\n')
                 for j,token_ids in enumerate(top_3_token_predictions):
                     # print(PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=token_ids))
                     masked_sequence = masked_sequence.replace(tokenizer.mask_token, tokenizer.decode([token_ids[0]]), 1)
                     # print(masked_sequence)
-                    fact.write(str(masked_sequence)+'\n')
+                    fact.write(str(masked_sequence))
                     fact.write('\n')
+                fact.write('\n')
         fact.close()
 
 
@@ -141,6 +142,27 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model)
     model = AutoModelForMaskedLM.from_pretrained(args.pretrained_model)
     model.to(device)
+    print(train_args)
+    # dataset, dataset_labels, train_samples_len, eval_samples_len = fetch_data(files=['train.txt', 'dev.txt'])
+    # print(len(dataset), train_samples_len, eval_samples_len)
+    # tokenized_input = tokenize(dataset, tokenizer)
+    # train_tokenized_input, eval_tokenized_input = {}, {}
+    # for k,v in tokenized_input.items():
+    #     train_tokenized_input[k] = v[:train_samples_len]
+    #     eval_tokenized_input[k] = v[train_samples_len:]
+    # v = 0
+    # for i,j in train_tokenized_input.items():
+    #     if i == 'input_ids':
+    #         tokens = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=j[0])
+    #         print(tokens)
+    #         #print(tokenizer.convert_tokens_to_string(tokens=tokens))
+    #
+    # for i,j in eval_tokenized_input.items():
+    #     if i == 'input_ids':
+    #         tokens = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=j[4])
+    #         print(tokens)
+    #         # print(tokenizer.convert_tokens_to_string(tokens=tokens))
+    #
 
     # prepare data
     if train_args.do_train:
@@ -169,7 +191,12 @@ if __name__ == '__main__':
     par.add_argument('--do_eval', action='store_true', help='call if you want to evaluate a fine-tuned pretrained model on validation dataset')
     par.add_argument('--do_fill', action='store_false', help='Get the model to fill in masked entities in the validation dataset')
     par.add_argument('--output_dir', default='output', help='indicate where you want model and results to be stored')
+    par.add_argument('--overwrite_output_dir', action='store_true', help='overwrite existing output directory')
     par.add_argument('--pretrained_model', default='dmis-lab/biobert-v1.1', help='pre-trained model available via hugging face')
+    par.add_argument('--num_train_epochs', default=3, help='number of training epochs')
     par.add_argument('--per_device_train_batch_size', default=8, help='training batch size')
+    par.add_argument('--per_device_eval_batch_size', default=8, help='eval batch size')
+    par.add_argument('--save_steps', default=1500, help='eval batch size')
+    par.add_argument('--resume_from_checkpoint', default=None, help='location of most recent model checkpoint')
     args = par.parse_args()
     main(args)
