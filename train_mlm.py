@@ -19,6 +19,7 @@ from datasets import load_dataset
 import prepare_data
 import torch
 import transformers
+import json
 from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_MASKED_LM_MAPPING,
@@ -136,6 +137,7 @@ def evaluate(data, labels, train_args, model, tokenizer):
 
 
 def main(args):
+    outcomes = json.load(open(args.data + 'outcome_occurrence.json', 'r'))
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     parser = HfArgumentParser(TrainingArguments)
     train_args, = parser.parse_args_into_dataclasses()
@@ -143,26 +145,56 @@ def main(args):
     model = AutoModelForMaskedLM.from_pretrained(args.pretrained_model)
     model.to(device)
     print(train_args)
-    # dataset, dataset_labels, train_samples_len, eval_samples_len = fetch_data(files=['train.txt', 'dev.txt'])
-    # print(len(dataset), train_samples_len, eval_samples_len)
-    # tokenized_input = tokenize(dataset, tokenizer)
-    # train_tokenized_input, eval_tokenized_input = {}, {}
-    # for k,v in tokenized_input.items():
-    #     train_tokenized_input[k] = v[:train_samples_len]
-    #     eval_tokenized_input[k] = v[train_samples_len:]
-    # v = 0
-    # for i,j in train_tokenized_input.items():
-    #     if i == 'input_ids':
-    #         tokens = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=j[0])
-    #         print(tokens)
-    #         #print(tokenizer.convert_tokens_to_string(tokens=tokens))
-    #
-    # for i,j in eval_tokenized_input.items():
-    #     if i == 'input_ids':
-    #         tokens = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=j[4])
-    #         print(tokens)
-    #         # print(tokenizer.convert_tokens_to_string(tokens=tokens))
-    #
+    print('--------------------------------------------------------------------------------')
+    dataset, dataset_labels, train_samples_len, eval_samples_len = prepare_data.fetch_data(
+        files=[args.data + '/train.txt', args.data + '/dev.txt'])
+    tokenized_input = tokenize(dataset, tokenizer)
+    train_tokenized_input, eval_tokenized_input = {}, {}
+    train_labels, eval_labels = [], []
+    for k, v in tokenized_input.items():
+        train_tokenized_input[k] = v[:train_samples_len]
+        eval_tokenized_input[k] = v[train_samples_len:]
+        train_labels = dataset_labels[:train_samples_len]
+        eval_labels = dataset_labels[train_samples_len:]
+    v = 0
+    print(tokenizer.all_special_tokens, tokenizer.all_special_ids)
+    unique_labels = list(set([i for j in dataset_labels for i in j.split()]))
+    unique_labels.remove('O')
+    # print(train_tokenized_input)
+    inpt_ids = []
+    for i, j in train_tokenized_input.items():
+        if i == 'input_ids':
+            q, w = [], []
+            for n in range(len(j)):
+                seq_ids, indices_to_mask, masked_seq_ids = j[n], [], []
+                tokens = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=seq_ids)
+                # tokens = [tok for tok in tokens if tok not in tokenizer.all_special_tokens]
+                seq_outcomes = prepare_data.identify_outcome_using_label(seq=dataset[n], seq_labels=dataset_labels[n])
+                if len(seq_outcomes) >= 1:
+                    try:
+                        if 103 in seq_ids:
+                            print(seq_ids)
+                        # print([tok for tok in tokens if tok not in tokenizer.all_special_tokens])
+                        # print(seq_outcomes)
+                        # print([id for id in seq_ids if id not in tokenizer.all_special_ids])
+                        for outcome in seq_outcomes:
+                            outcome_tok_ids = [tok for tok in tokenizer.encode(outcome) if tok not in tokenizer.all_special_ids]
+                            # print(outcome_tok_ids)
+                            for tok_id in outcome_tok_ids:
+                                indices_to_mask.append(tok_id)
+                        seq_ids = [103 if id in indices_to_mask else id for id in seq_ids]
+                        # print(indices_to_mask)
+                        # print([id for id in seq_ids if id not in [100, 102, 0, 101]])
+                        # print('\n')
+                    except:
+                        raise ValueError('Outcome exists but not identified')
+                elif len(seq_outcomes) == 0 and any(k in unique_labels for k in dataset_labels[n].split()):
+                    raise ValueError('Outcome exists but not identified')
+                inpt_ids.append(seq_ids)
+            h = 0
+            print(len(q), len(w))
+
+    train_tokenized_input['input_ids'] = inpt_ids
 
     # prepare data
     if train_args.do_train:
@@ -189,10 +221,10 @@ if __name__ == '__main__':
     par.add_argument('--data', default='data/ebm-comet/', help='source of data')
     par.add_argument('--do_train', action='store_true', help='call if you want to fine-tune pretrained model on dataset')
     par.add_argument('--do_eval', action='store_true', help='call if you want to evaluate a fine-tuned pretrained model on validation dataset')
-    par.add_argument('--do_fill', action='store_false', help='Get the model to fill in masked entities in the validation dataset')
+    par.add_argument('--do_fill', action='store_true', help='Get the model to fill in masked entities in the validation dataset')
     par.add_argument('--output_dir', default='output', help='indicate where you want model and results to be stored')
     par.add_argument('--overwrite_output_dir', action='store_true', help='overwrite existing output directory')
-    par.add_argument('--pretrained_model', default='dmis-lab/biobert-v1.1', help='pre-trained model available via hugging face')
+    par.add_argument('--pretrained_model', default='dmis-lab/biobert-v1.1', help='pre-trained model available via hugging face e.g. dmis-lab/biobert-v1.1')
     par.add_argument('--num_train_epochs', default=3, help='number of training epochs')
     par.add_argument('--per_device_train_batch_size', default=8, help='training batch size')
     par.add_argument('--per_device_eval_batch_size', default=8, help='eval batch size')
