@@ -20,12 +20,13 @@ import prepare_data
 import torch
 import transformers
 import json
+import outcome_mask
 from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_MASKED_LM_MAPPING,
     AutoConfig,
     AutoModelForMaskedLM,
-AutoModelWithLMHead,
+    AutoModelWithLMHead,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
     DataCollatorForWholeWordMask,
@@ -42,6 +43,7 @@ from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 from argparse import ArgumentParser
 from tqdm import tqdm
+
 
 class Outcome_Dataset(torch.utils.data.Dataset):
     def __init__(self, encodings):
@@ -145,66 +147,25 @@ def main(args):
     model = AutoModelForMaskedLM.from_pretrained(args.pretrained_model)
     model.to(device)
     print(train_args)
-    print('--------------------------------------------------------------------------------')
-    dataset, dataset_labels, train_samples_len, eval_samples_len = prepare_data.fetch_data(
-        files=[args.data + '/train.txt', args.data + '/dev.txt'])
+    print('---------------------------------------Read and Tokenize the data-------------------------------------------')
+    dataset, dataset_labels, train_samples_len, eval_samples_len = prepare_data.fetch_data(files=[args.data + '/train.txt', args.data + '/dev.txt'])
     tokenized_input = tokenize(dataset, tokenizer)
+    train_dataset, eval_dataset = dataset[:train_samples_len], dataset[train_samples_len:]
+    train_dataset_labels, eval_dataset_labels = dataset_labels[:train_samples_len], dataset_labels[train_samples_len:]
     train_tokenized_input, eval_tokenized_input = {}, {}
-    train_labels, eval_labels = [], []
     for k, v in tokenized_input.items():
         train_tokenized_input[k] = v[:train_samples_len]
         eval_tokenized_input[k] = v[train_samples_len:]
-        train_labels = dataset_labels[:train_samples_len]
-        eval_labels = dataset_labels[train_samples_len:]
-    v = 0
-    print(tokenizer.all_special_tokens, tokenizer.all_special_ids)
-    unique_labels = list(set([i for j in dataset_labels for i in j.split()]))
-    unique_labels.remove('O')
-    # print(train_tokenized_input)
-    inpt_ids = []
-    for i, j in train_tokenized_input.items():
-        if i == 'input_ids':
-            q, w = [], []
-            for n in range(len(j)):
-                seq_ids, indices_to_mask, masked_seq_ids = j[n], [], []
-                tokens = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=seq_ids)
-                # tokens = [tok for tok in tokens if tok not in tokenizer.all_special_tokens]
-                seq_outcomes = prepare_data.identify_outcome_using_label(seq=dataset[n], seq_labels=dataset_labels[n])
-                if len(seq_outcomes) >= 1:
-                    try:
-                        if 103 in seq_ids:
-                            print(seq_ids)
-                        # print([tok for tok in tokens if tok not in tokenizer.all_special_tokens])
-                        # print(seq_outcomes)
-                        # print([id for id in seq_ids if id not in tokenizer.all_special_ids])
-                        for outcome in seq_outcomes:
-                            outcome_tok_ids = [tok for tok in tokenizer.encode(outcome) if tok not in tokenizer.all_special_ids]
-                            # print(outcome_tok_ids)
-                            for tok_id in outcome_tok_ids:
-                                indices_to_mask.append(tok_id)
-                        seq_ids = [103 if id in indices_to_mask else id for id in seq_ids]
-                        # print(indices_to_mask)
-                        # print([id for id in seq_ids if id not in [100, 102, 0, 101]])
-                        # print('\n')
-                    except:
-                        raise ValueError('Outcome exists but not identified')
-                elif len(seq_outcomes) == 0 and any(k in unique_labels for k in dataset_labels[n].split()):
-                    raise ValueError('Outcome exists but not identified')
-                inpt_ids.append(seq_ids)
-            h = 0
-            print(len(q), len(w))
-
-    train_tokenized_input['input_ids'] = inpt_ids
 
     # prepare data
     if train_args.do_train:
-        train_data, train_data_labels = prepare_data.read_outcome_data_to_sentences(args.data+'train.txt')
-        train_tokenized_input = tokenize(train_data, tokenizer)
+        if args.custom_mask:
+            train_tokenized_input = outcome_mask.custom_mask(tokenizer=tokenizer, tokenized_input=train_tokenized_input, dataset=train_dataset, dataset_labels=train_dataset_labels)
         train_data = Outcome_Dataset(train_tokenized_input)
 
     if train_args.do_eval:
-        eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(args.data + 'dev.txt')
-        eval_tokenized_input = tokenize(eval_data, tokenizer)
+        if args.custom_mask:
+            eval_tokenized_input = outcome_mask.custom_mask(tokenizer=tokenizer, tokenized_input=eval_tokenized_input, dataset=eval_dataset, dataset_labels=eval_dataset_labels)
         eval_data = Outcome_Dataset(eval_tokenized_input)
 
     #training and evaluation
