@@ -3,6 +3,7 @@
 # @Created: 05/07/2021 
 # @Contact: michealabaho265@gmail.com
 import prepare_data
+import re
 from transformers import PreTrainedTokenizerFast
 
 '''
@@ -25,18 +26,11 @@ def custom_mask(tokenizer, tokenized_input, dataset, dataset_labels):
                 seq_outcomes = prepare_data.identify_outcome_using_label(seq=dataset[n], seq_labels=dataset_labels[n])
                 if len(seq_outcomes) >= 1:
                     try:
-                        # print([tok for tok in tokens if tok not in tokenizer.all_special_tokens])
-                        # print(seq_outcomes)
-                        # print([id for id in seq_ids if id not in tokenizer.all_special_ids])
                         for outcome in seq_outcomes:
                             outcome_tok_ids = [tok for tok in tokenizer.encode(outcome) if
                                                tok not in tokenizer.all_special_ids]
-                            for tok_id in outcome_tok_ids:
-                                indices_to_mask.append(tok_id)
-                        seq_ids = [103 if id in indices_to_mask else id for id in seq_ids]
-                        # print(indices_to_mask)
-                        # print([id for id in seq_ids if id not in [100, 102, 0, 101]])
-                        # print('\n')
+                            indices_to_mask.append(outcome_tok_ids)
+                            seq_ids = replace_id_with_mask_id(outcome_tok_ids, 103, seq_ids, expand=True)
                     except:
                         raise ValueError('Outcome exists but not identified')
                 elif len(seq_outcomes) == 0 and any(k in unique_labels for k in dataset_labels[n].split()):
@@ -45,3 +39,26 @@ def custom_mask(tokenizer, tokenized_input, dataset, dataset_labels):
     tokenized_input['input_ids'] = inpt_ids
 
     return tokenized_input
+
+'''
+    replace a sequence of id's representing an outcome with a mask id or a replacement value within id's of an input sequence 
+'''
+def replace_id_with_mask_id(sequence, replacement, lst, expand=False):
+    new_list = lst.copy()
+    for i, e in enumerate(lst):
+        if e == sequence[0]:
+            end = i
+            f = 1
+            for e1, e2 in zip(sequence, lst[i:]):
+                if e1 != e2:
+                    f = 0
+                    break
+                end += 1
+            if f == 1:
+                del new_list[i:end]
+                if expand:
+                    for _ in range(len(sequence)):
+                        new_list.insert(i, replacement)
+                else:
+                    new_list.insert(i, replacement)
+    return new_list
