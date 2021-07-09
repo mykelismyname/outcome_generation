@@ -79,6 +79,14 @@ class ExtraArguments:
         default=False,
         metadata={"help": "Evaluate how well model recalls outcomes"},
     )
+    mention_frequency: Optional[str] = field(
+        default='outcome_occurrence.json',
+        metadata={"help": "File with the outcome mention frequency."},
+    )
+    recall_metric: Optional[str] = field(
+        default='exact_match',
+        metadata={"help": "exact_match or partial match of all tokens"},
+    )
 
 
 #loading a tokenizer and tokenizing the input
@@ -159,19 +167,33 @@ def evaluate(data, labels, train_args, model, tokenizer):
                 fact.write('\n')
         fact.close()
 
-def fill_evaluation(data, labels, train_args, model, tokenizer):
-    outcomes = json.load(open(args.data + 'outcome_occurrence.json', 'r'))
+
+def fill_evaluation(data, labels, train_args, extra_args, model, tokenizer):
+    """
+        As the model to fill in the unknown e.g. After patients were given Sorafenib, they reported [BLANK].
+        Model should fill in the blank e.g. FATIGUE
+        metric: partial_match -  Given 4 outcomes of span length 3, if model doesn't recall all 3 tokens for each span e.g. (1/3 for outcome 1, 2/3 for outcome 2
+        1/3 for outcome 4, and 3/3 for outcome 4. accuracy will be determined by an average accuracy computed as (1/3 + 2/3 + 1/3 + 3/3)/4 = 1/2
+        metric: exact match - For the same example above, exact match accuracy would be 1/4, because only 1 outcome was fully recalled
+    """
+    outcomes = json.load(open(args.data + extra_args.mention_frequency, 'r'))
+    outcomes = {k.split(' [SEP] ')[0].strip():v for k,v in outcomes.items()}
     mem_accuracy = {}
-    print('\n\n\n\n\n\n++++++++++++++++++++++==============================================++++++++++++++++++++++++++++++++\n\n\n')
+    facts = {}
+    prompt_count = 1
+    print('\n\n\n+++++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++++\n\n\n')
     for text, labels in zip(data, labels):
+        prompt = {}
         exisiting_outcomes = prepare_data.identify_outcome_using_label(seq=text, seq_labels=labels)
+        prompt['text'] = text
+        correct_count = 0
         if exisiting_outcomes:
             for outcome in exisiting_outcomes:
+                prompt['masked_outcome'] = outcome
+                outcome_len = len(outcome.split())
                 mask = " ".join(tokenizer.mask_token for i in range(len(outcome.split())))
                 masked_text = text.replace(outcome, mask.rstrip())
-                print(1, text)
-                print(2, outcome)
-                print(3, masked_text)
+
                 input = tokenizer.encode(masked_text, return_tensors="pt")
                 mask_token_index = torch.where(input == tokenizer.mask_token_id)[1]
                 logits = model(input).logits
@@ -180,25 +202,54 @@ def fill_evaluation(data, labels, train_args, model, tokenizer):
                     mask = torch.unsqueeze(mask, 0)
                     mask_token_logits = logits[0, mask, :]
                     top_tokens = torch.topk(mask_token_logits, 1, dim=1).indices[0].tolist()
-                    print('===============================================', top_tokens)
                     top_token_predictions.append(top_tokens[0])
                 prediction = ' '.join([tokenizer.decode([id]) for id in top_token_predictions])
-                print(4, prediction)
+
                 for j,token_id in enumerate(top_token_predictions):
                     masked_text = masked_text.replace(tokenizer.mask_token, tokenizer.decode([token_id]), 1)
-                print(5, masked_text, '\n')
-                if outcomes[outcome] in mem_accuracy:
-                    if outcome.strip() == prediction.strip() or outcome.strip() in prediction.strip():
-                        mem_accuracy[outcomes[outcome]]['Correct'] +=1
-                    mem_accuracy[outcomes[outcome]]['Total'] += 1
-                else:
-                    mem_accuracy[outcomes[outcome]] = {'Total':1}
-                    if outcome.strip() == prediction.strip() or outcome.strip() in prediction.strip():
-                        mem_accuracy[outcomes[outcome]]['Correct'] = 1
-                    else:
-                        mem_accuracy[outcomes[outcome]]['Correct'] = 0
 
+                outcome, prediction = outcome.lower().strip(), prediction.lower().strip()
+                masked_text_len = len(masked_text.split())
+                if outcomes[outcome] in mem_accuracy:
+                    if extra_args.recall_metric == 'partial_match':
+                        print(outcome, prediction)
+                        T = [a == p for a, p in zip(outcome.split(), prediction.split())]
+                        C = np.count_nonzero(T)
+                        mem_accuracy[outcomes[outcome]].append(float(C/len(T)))
+                    elif extra_args.recall_metric == 'exact_match':
+                        if outcome == prediction or outcome in prediction:
+                            mem_accuracy[outcomes[outcome]]['Correct'] +=1
+                            prompt[str(outcome_len)+'_'+str(masked_text_len)+'_Correct'+'_'+str(correct_count+1)] = masked_text
+                        mem_accuracy[outcomes[outcome]]['Total'] += 1
+                else:
+                    if extra_args.recall_metric == 'partial_match':
+                        print(outcome, prediction)
+                        T = [a == p for a, p in zip(outcome.split(), prediction.split())]
+                        C = np.count_nonzero(T)
+                        mem_accuracy[outcomes[outcome]] = [float(C/len(T))]
+                    elif extra_args.recall_metric == 'exact_match':
+                        mem_accuracy[outcomes[outcome]] = {'Total':1}
+                        if outcome == prediction or outcome in prediction:
+                            mem_accuracy[outcomes[outcome]]['Correct'] = 1
+                            prompt[str(outcome_len)+'_'+str(masked_text_len)+'_Correct'+'_'+str(correct_count+1)] = masked_text
+                        else:
+                            mem_accuracy[outcomes[outcome]]['Correct'] = 0
+                correct_count += 1
+        facts[prompt_count] = prompt
+        prompt_count += 1
     print(mem_accuracy)
+    #store_the memorization accuracy
+    with open(args.data+'mem_accuracy.json', 'w') as mem_acc, open(args.data+'fact_predictions.json', 'w') as fc:
+        mem_accuracy_ = {}
+        for freq in mem_accuracy:
+            if extra_args.recall_metric == 'partial_match':
+                mem_accuracy_[freq] = np.mean(mem_accuracy[freq])
+            elif extra_args.recall_metric == 'exact_match':
+                if mem_accuracy[freq]['Correct'] > 0 and mem_accuracy[freq]['Total'] > 0:
+                    mem_accuracy_[freq] = float(mem_accuracy[freq]['Correct']/mem_accuracy[freq]['Total'])
+        json.dump(mem_accuracy_, mem_acc, indent=2)
+        json.dump(facts, fc, indent=2)
+
 
 def main(args):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -240,7 +291,7 @@ def main(args):
         model = AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
         eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(args.data + 'train.txt')
         tokenizer = AutoTokenizer.from_pretrained(extra_args.pretrained_model)
-        fill_evaluation(data=eval_data, labels=eval_data_labels, train_args=train_args, model=model, tokenizer=tokenizer)
+        fill_evaluation(data=eval_data, labels=eval_data_labels, train_args=train_args, extra_args=extra_args, model=model, tokenizer=tokenizer)
 
 if __name__ == '__main__':
     par = ArgumentParser()
@@ -258,5 +309,7 @@ if __name__ == '__main__':
     par.add_argument('--save_steps', default=1500, required=True, help='eval batch size')
     par.add_argument('--resume_from_checkpoint', default=None, help='location of most recent model checkpoint')
     par.add_argument('--custom_mask', action='store_true', help='specify tokens to mask and avoid using the data collator')
+    par.add_argument('--mention_frequency', default='outcome_occurrence.json', help='File with the outcome mention frequency.')
+    par.add_argument('--recall_metric', default='exact_match', help='exact_match or partial_matial')
     args = par.parse_args()
     main(args)
