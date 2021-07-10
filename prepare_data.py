@@ -15,14 +15,19 @@ def fetch_data(files):
     dataset_labels = []
     train_samples_len, eval_samples_len = 0, 0
     for file in files:
-        data, data_labels = read_outcome_data_to_sentences(args.data+'/'+file)
+        data, data_labels = read_outcome_data_to_sentences(file)
         if file.__contains__('train'):
             train_samples_len = len(data)
         if file.__contains__('dev'):
             eval_samples_len = len(data)
         dataset = dataset + data
         dataset_labels = dataset_labels + data_labels
-    return dataset, dataset_labels, train_samples_len, eval_samples_len
+    if len(files) == 2:
+        print(len(dataset), train_samples_len, eval_samples_len)
+        return dataset, dataset_labels, train_samples_len, eval_samples_len
+    else:
+        print(len(dataset), train_samples_len, eval_samples_len)
+        return dataset, dataset_labels
 
 #Pushing trailing punctuation characters at the end of tokens to next line
 def correct_dataset(file):
@@ -67,7 +72,8 @@ def read_outcome_data_to_sentences(path):
     # print(list(zip(text[:5], labels[:5])))
     return (text, labels)
 
-def study_context_patterns(data, labels):
+#count how frequent each outcome occurs in the dataset
+def outcome_frequency(data, labels):
     outcomes, types = [], []
     unique_labels = list(set([i for j in labels for i in j.split()]))
     unique_labels.remove('O')
@@ -83,15 +89,16 @@ def study_context_patterns(data, labels):
                     if m == e:
                         outcome = ''
                         if y_split[m].strip().startswith('B-'):
-                            outcome += x_split[m].strip()
+                            outcome += x_split[m].lower().strip()
                             e += 1
+                            outcome_type = y_split[m].strip().split('-', 1)[-1].strip()
                             for w in range(m+1, len(x_split)):
                                 if y_split[w].startswith('I-'):
-                                    outcome += ' '+x_split[w].strip()
+                                    outcome += ' '+x_split[w].lower().strip()
                                     e += 1
                                 else:
                                     break
-                            sentence_outcomes.append(outcome)
+                            sentence_outcomes.append((outcome.strip(), outcome_type))
                         else:
                             e += 1
                 if sentence_outcomes:
@@ -103,26 +110,57 @@ def study_context_patterns(data, labels):
             pass
     outcome_occurence = Counter(outcomes)
     outcome_occurence = dict(sorted(outcome_occurence.items(), key = lambda v:v[1], reverse=True))
+    outcome_occurence = dict([[' [SEP] '.join(i for i in k),v] for k,v in outcome_occurence.items()])
+    print(outcome_occurence)
     with open(args.data+'/outcome_occurrence.json', 'w') as oc:
         json.dump(outcome_occurence, oc, indent=2)
     print(outcome_occurence)
 
+#extract an outcome based on the label
+def identify_outcome_using_label(seq, seq_labels):
+    x_split, y_split = seq.split(), seq_labels.split()
+    sentence_outcomes = []
+    if len(x_split) == len(y_split):
+        e = 0
+        for m in range(len(x_split)):
+            if m == e:
+                outcome = ''
+                if y_split[m].strip().startswith('B-'):
+                    outcome += x_split[m].strip()
+                    e += 1
+                    for w in range(m + 1, len(x_split)):
+                        if y_split[w].startswith('I-'):
+                            outcome += ' ' + x_split[w].strip()
+                            e += 1
+                        else:
+                            break
+                    sentence_outcomes.append(outcome)
+                else:
+                    e += 1
+    return sentence_outcomes
+
+#creating an empty directory
+def create_directories_per_series_des(name=''):
+    _dir = os.path.abspath(os.path.join(os.path.curdir, name))
+    if not os.path.exists(_dir):
+        os.makedirs(_dir)
+    return _dir
 
 def main(args):
     if args.correct_dataset:
         correct_dataset(args.data)
     if args.read_outcome_data:
         read_outcome_data_to_sentences(args.data)
-    if args.study_context_patterns:
+    if args.outcome_frequency:
         #specify the path to the directory with train.txt and dev.txt files i.e. via args.data
-        dataset, dataset_labels, train_samples_len, eval_samples_len = fetch_data(['train.txt', 'dev.txt'])
-        study_context_patterns(data=dataset, labels=dataset_labels)
+        dataset, dataset_labels, train_samples_len, eval_samples_len = fetch_data([args.data+'/train.txt', args.data+'/dev.txt'])
+        outcome_frequency(data=dataset, labels=dataset_labels)
 
 if __name__ == '__main__':
     par = ArgumentParser()
     par.add_argument('--data', default='data/ebm_comet_multilabels.txt', help='source of data')
     par.add_argument('--correct_dataset', action='store_true', help='move trailing punctuation characters to a new line in the dataset')
     par.add_argument('--read_outcome_data', action='store_true', help='reading train, test and validation files independently')
-    par.add_argument('--study_context_patterns', action='store_true', help='check most frequent outcome and the context around it')
+    par.add_argument('--outcome_frequency', action='store_true', help='check most frequent outcome and the context around it')
     args = par.parse_args()
     main(args)
