@@ -46,7 +46,7 @@ def mem_fre_len(args):
         d.fig.subplots_adjust(top=0.8)  # adjust the Figure in rp
         d.fig.suptitle('Model Recalling Rate')
         d.add_legend()
-        data_expanded_df.to_csv('data/ebm-comet/data.csv')
+        data_expanded_df.to_csv(args.output_dir+'/data.csv')
         # # Creating figure
         # fig = plt.figure(figsize=(10, 7))
         # ax = plt.axes(projection="3d")
@@ -68,7 +68,7 @@ def mem_fre_len(args):
         # ax.set_zlabel('Memorization Accuracy', fontweight='bold')
         # # fig.colorbar(sctt, ax=ax, shrink=0.5, aspect=5)
         # plt.title('Model Recalling Rate')
-        plt.savefig('data/ebm-comet/plot2.png')
+        plt.savefig(args.output_dir+'/plot.png')
         # ax.legend()
         # # show plot
         plt.show()
@@ -77,6 +77,7 @@ if __name__ == '__main__':
     par = argparse.ArgumentParser()
     par.add_argument('--outcome_occurrence', default='data/ebm-comet/outcome_occurrence.json', help='source file with outcome frequence details')
     par.add_argument('--mem_accuracy', default='data/ebm-comet/mem_accuracy.json', help='source file with memorization accuracy')
+    par.add_argument('--output_dir', default='output/', help='directory emorization accuracy')
     args = par.parse_args()
     mem_fre_len(args)
 
