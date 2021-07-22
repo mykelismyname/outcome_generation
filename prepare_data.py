@@ -8,6 +8,7 @@ import re
 from argparse import ArgumentParser
 from collections import Counter
 import json
+from glob import glob
 
 #fetch the data
 def fetch_data(files):
@@ -20,11 +21,13 @@ def fetch_data(files):
             train_samples_len = len(data)
         if file.__contains__('dev'):
             eval_samples_len = len(data)
+        if file.__contains__('test'):
+            test_samples_len = len(data)
         dataset = dataset + data
         dataset_labels = dataset_labels + data_labels
-    if len(files) == 2:
+    if len(files) > 1:
         print(len(dataset), train_samples_len, eval_samples_len)
-        return dataset, dataset_labels, train_samples_len, eval_samples_len
+        return dataset, dataset_labels, train_samples_len, eval_samples_len, test_samples_len
     else:
         print(len(dataset), train_samples_len, eval_samples_len)
         return dataset, dataset_labels
@@ -140,7 +143,7 @@ def identify_outcome_using_label(seq, seq_labels):
     return sentence_outcomes
 
 #creating an empty directory
-def create_directories_per_series_des(name=''):
+def create_directory(name=''):
     _dir = os.path.abspath(os.path.join(os.path.curdir, name))
     if not os.path.exists(_dir):
         os.makedirs(_dir)
@@ -153,7 +156,8 @@ def main(args):
         read_outcome_data_to_sentences(args.data)
     if args.outcome_frequency:
         #specify the path to the directory with train.txt and dev.txt files i.e. via args.data
-        dataset, dataset_labels, train_samples_len, eval_samples_len = fetch_data([args.data+'/train.txt', args.data+'/dev.txt'])
+        files = [i for i in glob(args.data+'/*.txt') if os.path.basename(i) in ['train.txt', 'dev.txt', 'test.txt']]
+        dataset, dataset_labels, train_samples_len, eval_samples_len, test_samples_len = fetch_data(files)
         outcome_frequency(data=dataset, labels=dataset_labels)
 
 if __name__ == '__main__':
