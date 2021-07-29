@@ -11,12 +11,35 @@ import json
 from glob import glob
 
 #fetch the data
-def fetch_data(files):
-    dataset = []
-    dataset_labels = []
+def fetch_data(args, files):
+    """
+           Fecth data and create lists of train sentences and the list of sentence labels (label per token in sentence)
+           Partial_contexts - reduces the size of training data by picking only sentences whose outcomes have a particular frequnecu,
+           The top 25% most frequent, top half most (50%) frequent and least half (25%) most frequent
+    """
+    dataset, dataset_labels = [], []
     train_samples_len, eval_samples_len = 0, 0
     for file in files:
         data, data_labels = read_outcome_data_to_sentences(file)
+        if args.partial_contexts:
+            data_copy, data_labels_copy, = data.copy(), data_labels.copy()
+            data, data_labels = [], []
+            files_dir = os.path.dirname(file)
+            outcomes_occurrence = json.load(open(files_dir+'/outcome_occurrence.json'))
+            outcomes_occurrence = {k.split(' [SEP] ')[0].strip().lower():v for k,v in outcomes_occurrence.items()}
+            outcomes_occurrence_list = set(list(outcomes_occurrence.values()))
+            for text, labels in zip(data_copy, data_labels_copy):
+                found_outcomes = identify_outcome_using_label(seq=text, seq_labels=labels)
+                if not found_outcomes:
+                    data.append(text)
+                    data_labels.append(labels)
+                else:
+                    for o_come in found_outcomes:
+                        if outcomes_occurrence[o_come.lower()] >= np.percentile(list(outcomes_occurrence_list), 75):
+                            data.append(text)
+                            data_labels.append(labels)
+                            break
+
         if file.__contains__('train'):
             train_samples_len = len(data)
         if file.__contains__('dev'):
@@ -25,6 +48,7 @@ def fetch_data(files):
             test_samples_len = len(data)
         dataset = dataset + data
         dataset_labels = dataset_labels + data_labels
+
     if len(files) > 1:
         print(len(dataset), train_samples_len, eval_samples_len)
         return dataset, dataset_labels, train_samples_len, eval_samples_len, test_samples_len
