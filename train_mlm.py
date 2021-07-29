@@ -62,6 +62,10 @@ class ExtraArguments:
     """
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch.
     """
+    data: Optional[str] = field(
+        default='data/ebm-comet/',
+        metadata={"help": "'source of data'"},
+    )
     pretrained_model: Optional[str] = field(
         default='bert-base-uncased',
         metadata={"help": "The model checkpoint for weights initialization." "Don't set if you want to train a model from scratch."
@@ -87,7 +91,10 @@ class ExtraArguments:
         default='exact_match',
         metadata={"help": "exact_match or partial match of all tokens"},
     )
-
+    partial_contexts: Optional[bool] = field(
+        default=False,
+        metadata={"help":"train mlm with prompts having different contexts, where contexts refers to prompts of different freq occurence"},
+    )
 
 #loading a tokenizer and tokenizing the input
 def tokenize(input_text, tokenizer):
@@ -176,7 +183,7 @@ def fill_evaluation(data, labels, train_args, extra_args, model, tokenizer):
         1/3 for outcome 4, and 3/3 for outcome 4. accuracy will be determined by an average accuracy computed as (1/3 + 2/3 + 1/3 + 3/3)/4 = 1/2
         metric: exact match - For the same example above, exact match accuracy would be 1/4, because only 1 outcome was fully recalled
     """
-    outcomes = json.load(open(args.data + extra_args.mention_frequency, 'r'))
+    outcomes = json.load(open(extra_args.mention_frequency, 'r'))
     outcomes = {k.split(' [SEP] ')[0].strip():v for k,v in outcomes.items()}
     mem_accuracy = {}
     facts = {}
@@ -238,8 +245,10 @@ def fill_evaluation(data, labels, train_args, extra_args, model, tokenizer):
         facts[prompt_count] = prompt
         prompt_count += 1
     print(mem_accuracy)
+    eval_dir = prepare_data.create_directory(train_args.output_dir+'/{}'.format(extra_args.recall_metric))
     #store_the memorization accuracy
-    with open(args.data+'mem_accuracy.json', 'w') as mem_acc, open(args.data+'fact_predictions.json', 'w') as fc:
+    with open(eval_dir+'/mem_accuracy.json', 'w') as mem_acc, \
+            open(eval_dir+'/fact_predictions.json', 'w') as fc:
         mem_accuracy_ = {}
         for freq in mem_accuracy:
             if extra_args.recall_metric == 'partial_match':
@@ -263,14 +272,14 @@ def main(args):
     print('---------------------------------------Read and Tokenize the data-------------------------------------------')
     # prepare data
     if train_args.do_train:
-        train_dataset, train_dataset_labels = prepare_data.fetch_data(files=[args.data + '/train.txt'])
+        train_dataset, train_dataset_labels = prepare_data.fetch_data(extra_args, files=[extra_args.data + '/train.txt'])
         train_tokenized_input = tokenize(train_dataset, tokenizer)
         if extra_args.custom_mask:
             train_tokenized_input = outcome_mask.custom_mask(tokenizer=tokenizer, tokenized_input=train_tokenized_input, dataset=train_dataset, dataset_labels=train_dataset_labels)
         train_data = Outcome_Dataset(train_tokenized_input)
 
     if train_args.do_eval:
-        eval_dataset, eval_dataset_labels = prepare_data.fetch_data(files=[args.data + '/dev.txt'])
+        eval_dataset, eval_dataset_labels = prepare_data.fetch_data(extra_args, files=[extra_args.data + '/dev.txt'])
         eval_tokenized_input = tokenize(eval_dataset, tokenizer)
         if extra_args.custom_mask:
             eval_tokenized_input = outcome_mask.custom_mask(tokenizer=tokenizer, tokenized_input=eval_tokenized_input, dataset=eval_dataset, dataset_labels=eval_dataset_labels)
@@ -282,14 +291,15 @@ def main(args):
 
     #fill in masked tokens
     if extra_args.do_fill:
+        #data should be a file in which we intend to fill in unknown of a prompt
         eval_model = AutoModelForMaskedLM.from_pretrained(train_args.output_dir)
-        eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(args.data+'train.txt')
+        eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data+'dev.txt')
         evaluate(data=eval_data, labels=eval_data_labels, train_args=train_args, model=eval_model, tokenizer=tokenizer)
 
     #evlauate filling task
     if extra_args.fill_evaluation:
         model = AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
-        eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(args.data + 'train.txt')
+        eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data)
         tokenizer = AutoTokenizer.from_pretrained(extra_args.pretrained_model)
         fill_evaluation(data=eval_data, labels=eval_data_labels, train_args=train_args, extra_args=extra_args, model=model, tokenizer=tokenizer)
 
@@ -304,12 +314,13 @@ if __name__ == '__main__':
     par.add_argument('--overwrite_output_dir', action='store_true', help='overwrite existing output directory')
     par.add_argument('--pretrained_model', default='dmis-lab/biobert-v1.1', help='pre-trained model available via hugging face e.g. dmis-lab/biobert-v1.1')
     par.add_argument('--num_train_epochs', default=3, help='number of training epochs')
-    par.add_argument('--per_device_train_batch_size', default=8, required=True, help='training batch size')
-    par.add_argument('--per_device_eval_batch_size', default=8, required=True,  help='eval batch size')
-    par.add_argument('--save_steps', default=1500, required=True, help='eval batch size')
+    par.add_argument('--per_device_train_batch_size', default=16, help='training batch size')
+    par.add_argument('--per_device_eval_batch_size', default=16, help='eval batch size')
+    par.add_argument('--save_steps', default=1500, help='eval batch size')
     par.add_argument('--resume_from_checkpoint', default=None, help='location of most recent model checkpoint')
     par.add_argument('--custom_mask', action='store_true', help='specify tokens to mask and avoid using the data collator')
     par.add_argument('--mention_frequency', default='outcome_occurrence.json', help='File with the outcome mention frequency.')
     par.add_argument('--recall_metric', default='exact_match', help='exact_match or partial_matial')
+    par.add_argument('--partial_contexts', action='store_true', help='train mlm with prompts having different contexts, where contexts refers to prompts of different freq occurence')
     args = par.parse_args()
     main(args)
