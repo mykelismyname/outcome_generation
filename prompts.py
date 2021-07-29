@@ -15,6 +15,8 @@ def prompts(data, outcome_occurrence, count):
         outcome, outcome_type = k.split('[SEP]')
         outcome_occurrence[outcome.strip()] = {'frequency':int(v), 'type':outcome_type.strip()}
 
+    outcome_occurrence = {k:v for k,v in outcome_occurrence.items() if v['frequency'] >= count}
+
     popular = False
     for text, labels in zip(prompts, prompts_labels):
         text_outcomes = [i.strip() for i in prepare_data.identify_outcome_using_label(seq=text, seq_labels=labels)]
@@ -61,7 +63,8 @@ def prompt(args):
                     # prediction = '\033[1m' + ' '.join([tokenizer.decode([id]) for id in p]) + '\033[0m'
                     prediction = ' '.join([tokenizer.decode([id]) for id in p])
                     if i == 0:
-                        un_masked_text = masked_text.replace(mask, prediction, 1)
+                        un_masked_text = masked_text.replace(mask, prediction.strip(), 1)
+                        un_masked_text = re.sub(r'\s+', ' ', un_masked_text)
                         print(un_masked_text, '\nOther Predictions')
                     else:
                         print('Prediction {}:- {}'.format(i+1, prediction))
@@ -80,5 +83,5 @@ if __name__ == '__main__':
     par.add_argument('--data',  help='source of data')
     par.add_argument('--mention_frequency', default='outcome_occurrence.json', help='File with the outcome mention frequency.')
     args = par.parse_args()
-    # prompts(args.data, args.mention_frequency, 50)
-    prompt(args)
+    prompts(args.data, args.mention_frequency, 300)
+    # prompt(args)
