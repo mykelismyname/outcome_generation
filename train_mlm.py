@@ -36,6 +36,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
     set_seed,
+    GPT2Tokenizer, GPT2TokenizerFast, GPT2Model,
     AdamW,
 )
 from torch.utils.data import DataLoader
@@ -97,8 +98,8 @@ class ExtraArguments:
     )
 
 #loading a tokenizer and tokenizing the input
-def tokenize(input_text, tokenizer):
-    tokenized_encodings = tokenizer(input_text, max_length=512, truncation=True, padding=True)
+def tokenize(input_text, tokenizer, model):
+    tokenized_encodings = tokenizer(input_text) if model.lower() == 'gpt2' else tokenizer(input_text, max_length=512, truncation=True, padding=True)
     tokenized_encodings['labels'] = tokenized_encodings.input_ids.copy()
     return tokenized_encodings
 
@@ -264,8 +265,10 @@ def main(args):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     parser = HfArgumentParser((ExtraArguments, TrainingArguments))
     extra_args, train_args = parser.parse_args_into_dataclasses()
-    tokenizer = AutoTokenizer.from_pretrained(extra_args.pretrained_model)
-    model = AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
+    tokenizer = GPT2TokenizerFast.from_pretrained(extra_args.pretrained_model) if extra_args.pretrained_model.lower() == 'gpt2' else \
+                AutoTokenizer.from_pretrained(extra_args.pretrained_model)
+    model = GPT2Model.from_pretrained(extra_args.pretrained_model) if extra_args.pretrained_model.lower() == 'gpt2' else \
+                AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
     model.to(device)
 
     print(train_args, '\n', extra_args)
@@ -273,16 +276,16 @@ def main(args):
     # prepare data
     if train_args.do_train:
         train_dataset, train_dataset_labels = prepare_data.fetch_data(extra_args, files=[extra_args.data + '/train.txt'])
-        train_tokenized_input = tokenize(train_dataset, tokenizer)
+        train_tokenized_input = tokenize(train_dataset, tokenizer, extra_args.pretrained_model)
         if extra_args.custom_mask:
-            train_tokenized_input = outcome_mask.custom_mask(tokenizer=tokenizer, tokenized_input=train_tokenized_input, dataset=train_dataset, dataset_labels=train_dataset_labels)
+            train_tokenized_input = outcome_mask.custom_mask(tokenizer=tokenizer, tokenized_input=train_tokenized_input, dataset=train_dataset, dataset_labels=train_dataset_labels, model=extra_args.pretrained_model)
         train_data = Outcome_Dataset(train_tokenized_input)
 
     if train_args.do_eval:
         eval_dataset, eval_dataset_labels = prepare_data.fetch_data(extra_args, files=[extra_args.data + '/dev.txt'])
-        eval_tokenized_input = tokenize(eval_dataset, tokenizer)
+        eval_tokenized_input = tokenize(eval_dataset, tokenizer, extra_args.pretrained_model)
         if extra_args.custom_mask:
-            eval_tokenized_input = outcome_mask.custom_mask(tokenizer=tokenizer, tokenized_input=eval_tokenized_input, dataset=eval_dataset, dataset_labels=eval_dataset_labels)
+            eval_tokenized_input = outcome_mask.custom_mask(tokenizer=tokenizer, tokenized_input=eval_tokenized_input, dataset=eval_dataset, dataset_labels=eval_dataset_labels, model=extra_args.pretrained_model)
         eval_data = Outcome_Dataset(eval_tokenized_input)
 
     #training and evaluation

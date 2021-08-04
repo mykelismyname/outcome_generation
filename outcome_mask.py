@@ -4,12 +4,12 @@
 # @Contact: michealabaho265@gmail.com
 import prepare_data
 import re
-from transformers import PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast, GPT2TokenizerFast
 
 '''
     Masking specific tokens of the input dataset
 '''
-def custom_mask(tokenizer, tokenized_input, dataset, dataset_labels):
+def custom_mask(tokenizer, tokenized_input, dataset, dataset_labels, model):
     v = 0
     print(tokenizer.all_special_tokens, tokenizer.all_special_ids)
     #get a list of unique labels in the dataset
@@ -21,7 +21,8 @@ def custom_mask(tokenizer, tokenized_input, dataset, dataset_labels):
         if i == 'input_ids':
             for n in range(len(j)):
                 seq_ids, indices_to_mask, masked_seq_ids = j[n], [], []
-                tokens = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=seq_ids)
+                tokens = GPT2TokenizerFast.convert_ids_to_tokens(tokenizer, ids=seq_ids) if model.lower() == 'gpt2' else \
+                    PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=seq_ids)
                 # extract outcomes from sequence given they have been labelled
                 seq_outcomes = prepare_data.identify_outcome_using_label(seq=dataset[n], seq_labels=dataset_labels[n])
                 if len(seq_outcomes) >= 1:
@@ -34,6 +35,7 @@ def custom_mask(tokenizer, tokenized_input, dataset, dataset_labels):
                     except:
                         raise ValueError('Outcome exists but not identified')
                 elif len(seq_outcomes) == 0 and any(k in unique_labels for k in dataset_labels[n].split()):
+                    print(dataset[n], dataset_labels[n])
                     raise ValueError('Outcome exists but not identified')
                 inpt_ids.append(seq_ids)
     tokenized_input['input_ids'] = inpt_ids
