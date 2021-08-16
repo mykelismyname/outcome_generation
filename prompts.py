@@ -16,18 +16,40 @@ def prompts(data, outcome_occurrence, count):
         outcome_occurrence[outcome.strip()] = {'frequency':int(v), 'type':outcome_type.strip()}
 
     outcome_occurrence = {k:v for k,v in outcome_occurrence.items() if v['frequency'] >= count}
+    print(outcome_occurrence)
 
-    popular = False
     for text, labels in zip(prompts, prompts_labels):
         text_outcomes = [i.strip() for i in prepare_data.identify_outcome_using_label(seq=text, seq_labels=labels)]
         if text_outcomes:
+            s_e = False
+            #check prefix prompts
+            if len(text_outcomes) == 1:
+                if text.startswith(text_outcomes[0]):
+                    pass
+                    #print(text, text_outcomes)
+            # check postfix prompts
+            elif len(text_outcomes) == 1:
+                if text.endswith(text_outcomes[0]):
+                    pass
+                    #print(text, text_outcomes)
+            else:
+                for o in text_outcomes:
+                    if not text.startswith(o):
+                        if not text.endswith(o):
+                            s_e = True
+                if s_e:
+                    pass
+                else:
+                    print(text, text_outcomes)
+
+            popular = False
             for i in outcome_occurrence.keys():
                 if str(i) in text_outcomes:
                     popular = True
                     break
             if popular:
-                if len(text.split()) < 15:
-                    print(text, text_outcomes)
+                pass
+                # print(text, text_outcomes)
 
 def prompt(args):
     model = AutoModelForMaskedLM.from_pretrained(args.pretrained_model)
@@ -82,6 +104,7 @@ if __name__ == '__main__':
     par.add_argument('--pretrained_model', default='bert-base-cased', help='source of pretrained model')
     par.add_argument('--data',  help='source of data')
     par.add_argument('--mention_frequency', default='outcome_occurrence.json', help='File with the outcome mention frequency.')
+    par.add_argument('--count', default=1, type=int, help='Select input prompts with outcomes that have a count occurrence.')
     args = par.parse_args()
-    prompts(args.data, args.mention_frequency, 300)
+    prompts(args.data, args.mention_frequency, args.count)
     # prompt(args)
