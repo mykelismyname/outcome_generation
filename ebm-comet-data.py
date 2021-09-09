@@ -20,6 +20,7 @@ import json
 import os
 
 import datasets
+logger = datasets.logging.get_logger(__name__)
 
 # meta data
 _CITATION = """\
@@ -73,7 +74,7 @@ class EbmComet(datasets.GeneratorBasedBuilder):
                             "I-Adverse-effects",
                             "B-Life-Impact",
                             "I-Life-Impact",
-                            "B-Mortality"
+                            "B-Mortality",
                             "I-Mortality",
                             "B-Physiological-Clinical",
                             "I-Physiological-Clinical",
@@ -104,25 +105,21 @@ class EbmComet(datasets.GeneratorBasedBuilder):
         elif os.path.basename(data_urls[0]).__contains__('test'):
             my_urls = {"test": self.config.data_files}
         downloaded_files = dl_manager.download_and_extract(my_urls)
-        return [
-            datasets.SplitGenerator(name=datasets.Split.TRAIN, gen_kwargs={"filepath": downloaded_files["train"]}
-            ),
-            datasets.SplitGenerator(name=datasets.Split.TEST, gen_kwargs={"filepath": downloaded_files["dev"]},
-            ),
-            datasets.SplitGenerator(name=datasets.Split.TEST, gen_kwargs={"filepath": downloaded_files["test"]},
-            ),
-        ]
+        file_name = os.path.basename(data_urls[0]).split('.')
+        return [datasets.SplitGenerator(name=file_name[0], gen_kwargs={"filepath": downloaded_files[file_name[0]]})]
 
-    def _generate_examples(self, filepath, split):
+    def _generate_examples(self, filepath):
         """ Yields examples as (key, example) tuples. """
-        with open(filepath, encoding="utf-8") as f:
+        assert len(filepath) == 1, "We expected one data file to be loaded ata time, change the loading script if otherwise."
+        logger.info("generating examples from = %s", filepath[0])
+        with open(filepath[0], encoding="utf-8") as f:
             current_tokens = []
             current_labels = []
             sentence_counter = 0
             for row in f:
                 row = row.rstrip()
                 if row:
-                    token, label = row.split("\t")
+                    token, label = row.split(" ")
                     current_tokens.append(token)
                     current_labels.append(label)
                 else:
@@ -132,7 +129,6 @@ class EbmComet(datasets.GeneratorBasedBuilder):
                     sentence = (
                         sentence_counter,
                         {
-                            "id": str(sentence_counter),
                             "tokens": current_tokens,
                             "ner_tags": current_labels,
                         },
@@ -144,7 +140,6 @@ class EbmComet(datasets.GeneratorBasedBuilder):
             # Don't forget last sentence in dataset 🧐
             if current_tokens:
                 yield sentence_counter, {
-                    "id": str(sentence_counter),
                     "tokens": current_tokens,
                     "ner_tags": current_labels,
                 }
