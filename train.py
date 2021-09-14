@@ -45,6 +45,7 @@ from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 from argparse import ArgumentParser
 from tqdm import tqdm
+import detection_model as detection
 logger = logging.getLogger(__name__)
 
 class Outcome_Dataset(torch.utils.data.Dataset):
@@ -108,16 +109,19 @@ class ExtraArguments:
 
 def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    data_collator = DataCollatorForWholeWordMask(
+    data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
-        mlm_probability=0.15,
-        pad_to_multiple_of=None,
+        mlm_probability=0.15
     )
     #use the hugging face trainer API
     if extra_args.trainer_api:
-        for i in train_data:
-            print(i)
-            break
+        print('\nhereherehere\n')
+        for i, j in enumerate(train_data):
+            if i < 1:
+                print(j)
+                print(type(j))
+                for m,n in j.items():
+                    print(m,len(n))
         trainer = Trainer(
             model=model,
             args=train_args,
@@ -157,18 +161,38 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
                 "weight_decay": 0.0,
             },
         ]
-        train_loader = DataLoader(train_data, batch_size=train_args.per_device_train_batch_size, shuffle=True, collate_fn=data_collator if not extra_args.custom_mask else None)
+        print('\nType of Dataset\n', train_data)
+        for i in train_data:
+            print(i)
+            print(type(i))
+            print(train_args.per_device_train_batch_size)
+            for m,n in i.items():
+                print(m, type(n))
+            break
+        train_loader = DataLoader(train_data, batch_size=train_args.per_device_train_batch_size, collate_fn=data_collator if not extra_args.custom_mask else None)
         eval_loader = DataLoader(eval_data, batch_size=train_args.per_device_eval_batch_size, collate_fn=data_collator if not extra_args.custom_mask else None)
         optim = AdamW(optimizer_grouped_parameters, lr=train_args.learning_rate)
+
+        for t in train_loader:
+            print(t)
+            break
         for epoch in range(int(train_args.num_train_epochs)):
             # training_loop = tqdm(train_loader, leave=True)
+            model.train()
             for step, batch in enumerate(train_loader):
                 optim.zero_grad()
+                print(type(batch))
+                for i in batch:
+                    print(i)
+                    print('herhererher', batch[i].shape, type(batch[i]))
+                    print(batch[i][:4, :5])
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 labels = batch['labels'].to(device)
                 token_type_ids = batch['token_type_ids'].to(device)
-                outputs = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, labels=labels)
+                batch = transformers.BatchEncoding({'input_ids':input_ids, 'labels':labels, 'attention_mask':attention_mask})
+                print(input_ids.shape, attention_mask.shape, labels.shape)
+                outputs = model(**batch)
                 #loss
                 loss = outputs.loss
                 loss = loss / train_args.gradient_accumulation_steps
@@ -178,12 +202,12 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
                 optim.step()
                 #output
                 output_logits = outputs.logits
-                print(len(input_ids))
-                print(output_logits.shape)
-                for i,j in zip(input_ids, output_logits):
-                    tokens = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=i)
-                    print(tokens)
-                    print(tokenizer.convert_tokens_to_string(tokens))
+                # print(len(input_ids))
+                # print(output_logits.shape)
+                # for i,j in zip(input_ids, output_logits):
+                #     tokens = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=i)
+                #     print(tokens)
+                #     print(tokenizer.convert_tokens_to_string(tokens))
                 break
 
                 # if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
@@ -272,8 +296,8 @@ def fill_evaluation(data, labels, train_args, extra_args, model, tokenizer):
         existing_outcomes = [i[0] for i in exisiting_outcomes_labels]
         prompt['text'] = text
         correct_count = 0
-        if exisiting_outcomes:
-            for outcome in exisiting_outcomes:
+        if existing_outcomes:
+            for outcome in existing_outcomes:
                 prompt['masked_outcome'] = outcome
                 outcome_len = len(outcome.split())
                 mask = " ".join(tokenizer.mask_token for i in range(len(outcome.split())))
@@ -346,6 +370,7 @@ def main(args):
                 AutoTokenizer.from_pretrained(extra_args.pretrained_model)
     model = GPT2Model.from_pretrained(extra_args.pretrained_model) if extra_args.pretrained_model.lower() == 'gpt2' else \
                 AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
+    detection_model = detection.outcome_detection_model()
     model.to(device)
 
     print(train_args, '\n', extra_args)
@@ -380,7 +405,7 @@ def main(args):
         features = tr_data['train'].features
     if train_args.do_eval:
         ev_data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data + '/dev.txt'])
-        print(tev_data)
+        print(ev_data)
         text_column_name, label_column_name = ['tokens', 'ner_tags']
         features = ev_data['dev'].features
 
@@ -395,7 +420,7 @@ def main(args):
     # loading a tokenizer for tokenizing the input
     def tokenize(examples):
         tokenized_encodings = tokenizer(examples[text_column_name]) if extra_args.pretrained_model.lower() == 'gpt2' \
-            else tokenizer(examples[text_column_name],  truncation=True, padding=False, is_split_into_words=True)
+            else tokenizer(examples[text_column_name],  max_length=512,  truncation=True, padding=True, is_split_into_words=True)
         tokenized_encodings['labels'] = tokenized_encodings.input_ids.copy()
         labels = []
         for i, label in enumerate(examples[label_column_name]):
@@ -448,6 +473,11 @@ def main(args):
                                              tokenizer=tokenizer,
                                              labels_list=label_list,
                                              mask=extra_args.custom_mask)
+        if extra_args.trainer_api:
+            train_data = train_data.remove_columns(['ner_labels', 'tokens', 'ner_tags'])
+        else:
+            train_data = train_data.remove_columns(['tokens', 'ner_tags'])
+        # train_data = Outcome_Dataset(train_data)
         print(train_data)
         print(type(train_data))
 
