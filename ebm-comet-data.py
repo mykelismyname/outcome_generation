@@ -97,7 +97,7 @@ class EbmComet(datasets.GeneratorBasedBuilder):
     def _split_generators(self, dl_manager):
         """Returns SplitGenerators."""
         data_urls = self.config.data_files
-        assert len(data_urls) == 1, "We expected one data file to be loaded ata time, change the loading script if otherwise."
+        assert len(data_urls) == 1, "We expected one data file to be loaded at a time, change the loading script if otherwise."
         if os.path.basename(data_urls[0]).__contains__('train'):
             my_urls = {"train": self.config.data_files}
         elif os.path.basename(data_urls[0]).__contains__('dev'):
@@ -110,7 +110,7 @@ class EbmComet(datasets.GeneratorBasedBuilder):
 
     def _generate_examples(self, filepath):
         """ Yields examples as (key, example) tuples. """
-        assert len(filepath) == 1, "We expected one data file to be loaded ata time, change the loading script if otherwise."
+        assert len(filepath) == 1, "We expected one data file to be loaded at a time, change the loading script if otherwise."
         logger.info("generating examples from = %s", filepath[0])
         with open(filepath[0], encoding="utf-8") as f:
             current_tokens = []
