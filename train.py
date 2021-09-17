@@ -31,6 +31,7 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForLanguageModeling,
     DataCollatorForWholeWordMask,
+    default_data_collator,
     PreTrainedTokenizerFast,
     HfArgumentParser,
     Trainer,
@@ -97,6 +98,10 @@ class ExtraArguments:
         default='exact_match',
         metadata={"help": "exact_match or partial match of all tokens"},
     )
+    max_seq_length: Optional[int] = field(
+        default=256,
+        metadata={"help": "Max length of sequence"},
+    )
     label_all_tokens: Optional[bool] = field(
         default=False,
         metadata={
@@ -111,11 +116,11 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
-        mlm_probability=0.15
+        mlm=True,
+        mlm_probability=0.15 if not extra_args.custom_mask else 0.0
     )
     #use the hugging face trainer API
     if extra_args.trainer_api:
-        print('\nhereherehere\n')
         for i, j in enumerate(train_data):
             if i < 1:
                 print(j)
@@ -125,9 +130,9 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
         trainer = Trainer(
             model=model,
             args=train_args,
-            train_dataset=train_data,
-            eval_dataset=eval_data,
-            data_collator=data_collator if not extra_args.custom_mask else None,
+            train_dataset=train_data if train_args.do_train else None,
+            eval_dataset=eval_data if train_args.do_eval else None,
+            data_collator=data_collator,
             tokenizer=tokenizer,
         )
         train_result = trainer.train() if train_args.resume_from_checkpoint is None else trainer.train(resume_from_checkpoint=train_args.resume_from_checkpoint)
@@ -370,7 +375,7 @@ def main(args):
                 AutoTokenizer.from_pretrained(extra_args.pretrained_model)
     model = GPT2Model.from_pretrained(extra_args.pretrained_model) if extra_args.pretrained_model.lower() == 'gpt2' else \
                 AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
-    detection_model = detection.outcome_detection_model()
+    # detection_model = detection.outcome_detection_model()
     model.to(device)
 
     print(train_args, '\n', extra_args)
@@ -419,10 +424,13 @@ def main(args):
 
     # loading a tokenizer for tokenizing the input
     def tokenize(examples):
+        print('\n------------------------------------------label\n', label_list, '\n------------------------------------------Label to id\n', label_to_id)
+        max_seq_length = min(extra_args.max_seq_length, tokenizer.model_max_length)
         tokenized_encodings = tokenizer(examples[text_column_name]) if extra_args.pretrained_model.lower() == 'gpt2' \
-            else tokenizer(examples[text_column_name],  max_length=512,  truncation=True, padding=True, is_split_into_words=True)
+            else tokenizer(examples[text_column_name],  max_length=max_seq_length,  truncation=True, padding=True, is_split_into_words=True, return_special_tokens_mask=True)
         tokenized_encodings['labels'] = tokenized_encodings.input_ids.copy()
         labels = []
+
         for i, label in enumerate(examples[label_column_name]):
             word_ids = tokenized_encodings.word_ids(batch_index=i)
             previous_word_idx = None
@@ -441,11 +449,11 @@ def main(args):
                     # print('else 2', word_idx, label, label[word_idx])
                     label_ids.append(label_to_id[label[word_idx]] if extra_args.label_all_tokens else -100)
                 previous_word_idx = word_idx
-            if i < 4:
-                print(i, len(examples[text_column_name][i]), examples[text_column_name][i])
-                print(i, len(word_ids), word_ids)
-                print(i, len(label), label)
-                print(i, len(label_ids), label_ids)
+            # if i < 4:
+            #     print(i, len(examples[text_column_name][i]), examples[text_column_name][i])
+            #     print(i, len(word_ids), word_ids)
+            #     print(i, len(label), label)
+            #     print(i, len(label_ids), label_ids)
             labels.append(label_ids)
         tokenized_encodings["ner_labels"] = labels
         return tokenized_encodings
@@ -467,14 +475,23 @@ def main(args):
 
     #tokenise and prepare dataset for training
     if train_args.do_train:
+        print('Here is the tr data before tokenization', tr_data)
         tokenized_input = tr_data.map(tokenize, batched=True, desc="Running tokenizer on train data")
         train_tokenized_data = tokenized_input['train']
+        print('Have a look at whats been tokenized', tr_data, train_args)
+        for i in train_tokenized_data:
+            print(i)
+            break
         train_data = outcome_mask.customMask(train_tokenized_data,
                                              tokenizer=tokenizer,
                                              labels_list=label_list,
                                              mask=extra_args.custom_mask)
         if extra_args.trainer_api:
-            train_data = train_data.remove_columns(['ner_labels', 'tokens', 'ner_tags'])
+            train_data = train_data.remove_columns(['ner_labels', 'tokens', 'ner_tags', 'token_type_ids', 'labels'])
+            print(type(train_data))
+            for i in train_data:
+                print(i)
+                break
         else:
             train_data = train_data.remove_columns(['tokens', 'ner_tags'])
         # train_data = Outcome_Dataset(train_data)
@@ -517,6 +534,7 @@ if __name__ == '__main__':
     par.add_argument('--overwrite_output_dir', action='store_true', help='overwrite existing output directory')
     par.add_argument('--pretrained_model', default='dmis-lab/biobert-v1.1', help='pre-trained model available via hugging face e.g. dmis-lab/biobert-v1.1')
     par.add_argument('--num_train_epochs', default=3, help='number of training epochs')
+    par.add_argument('--max_seq_length', default=256, help='Maximum length of a sequence')
     par.add_argument('--per_device_train_batch_size', default=16, help='training batch size')
     par.add_argument('--per_device_eval_batch_size', default=16, help='eval batch size')
     par.add_argument('--save_steps', default=1500, help='eval batch size')
