@@ -10,6 +10,7 @@ import numpy as np
 import transformers
 import logging
 import math
+import random
 import os
 import sys
 from dataclasses import dataclass, field
@@ -167,19 +168,25 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
             },
         ]
         print('\nType of Dataset\n', train_data)
-        for i in train_data:
-            print(i)
-            print(type(i))
-            print(train_args.per_device_train_batch_size)
-            for m,n in i.items():
-                print(m, type(n))
-            break
+        # Log a few random samples from the training set:
+        for index in range(1):
+            print("Sample {} of the training set: {}. {}, {}".format(index, train_data[index], type(train_data), type(train_data[index])))
+            print(PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=train_data[index]['input_ids']))
+            for i, j in train_data[index].items():
+                print(i, len(j), type(j))
+
+        print("\n\n\n------Before dataloader-------\n\n---{}-------\n\n\n---------{}".format(train_data, type(train_data)))
+        train_data = train_data.remove_columns(['tokens', 'ner_tags', 'token_type_ids', 'labels'])
+        eval_data = eval_data.remove_columns(['tokens', 'ner_tags', 'token_type_ids', 'labels'])
+        print("\n\n\n------Before dataloader 2-------\n\n---{}-------\n\n\n---------{}".format(train_data, type(train_data)))
         train_loader = DataLoader(train_data, batch_size=train_args.per_device_train_batch_size, collate_fn=data_collator if not extra_args.custom_mask else None)
         eval_loader = DataLoader(eval_data, batch_size=train_args.per_device_eval_batch_size, collate_fn=data_collator if not extra_args.custom_mask else None)
         optim = AdamW(optimizer_grouped_parameters, lr=train_args.learning_rate)
 
         for t in train_loader:
             print(t)
+            for x,y in t.items():
+                print(x, y.shape)
             break
         for epoch in range(int(train_args.num_train_epochs)):
             # training_loop = tqdm(train_loader, leave=True)
@@ -194,8 +201,7 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 labels = batch['labels'].to(device)
-                token_type_ids = batch['token_type_ids'].to(device)
-                batch = transformers.BatchEncoding({'input_ids':input_ids, 'labels':labels, 'attention_mask':attention_mask})
+                batch = transformers.BatchEncoding({'attention_mask':attention_mask, 'input_ids':input_ids, 'labels':labels})
                 print(input_ids.shape, attention_mask.shape, labels.shape)
                 outputs = model(**batch)
                 #loss
@@ -231,9 +237,9 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
                     input_ids = batch['input_ids'].to(device)
                     attention_mask = batch['attention_mask'].to(device)
                     labels = batch['labels'].to(device)
-                    token_type_ids = batch['token_type_ids'].to(device)
-                    outputs = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask,
-                                    labels=labels)
+                    batch = transformers.BatchEncoding(
+                        {'attention_mask': attention_mask, 'input_ids': input_ids, 'labels': labels})
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                 loss = outputs.loss
                 losses.append(loss)
                 # losses.append(accelerator.gather(loss.repeat(args.per_device_eval_batch_size)))
@@ -389,10 +395,6 @@ def main(args):
         label_list.sort()
         return label_list
 
-    label_list = get_label_list(extra_args.data)
-    label_to_id = {l: i for i, l in enumerate(label_list)}
-    num_labels = len(label_list)
-
     #convert labels of a split(train or dev or test) to ids
     def labels_to_ids(list_of_labels, label_to_id):
         lst = []
@@ -405,27 +407,30 @@ def main(args):
     if train_args.do_train:
         tr_data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data + '/train.txt'])
         print(tr_data)
-        text_column_name, label_column_name = ['tokens', 'ner_tags']
-        print(text_column_name, label_column_name)
         features = tr_data['train'].features
+        column_names = tr_data['train'].column_names
+        text_column_name = "tokens" if "tokens" in column_names else column_names[0]
+        label_column_name = "ner_tags" if "ner_tags" in column_names else column_names[1]
     if train_args.do_eval:
         ev_data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data + '/dev.txt'])
         print(ev_data)
-        text_column_name, label_column_name = ['tokens', 'ner_tags']
         features = ev_data['dev'].features
 
     # fetch labels in the loaded datasets
-    if isinstance(features[label_column_name].feature, ClassLabel):
-        label_list = features[label_column_name].feature.names
-        label_to_id = {i: i for i in range(len(label_list))}
-    else:
-        label_list = get_label_list(tr_data["train"][label_column_name])
-        label_to_id = {l: i for i, l in enumerate(label_list)}
+    if train_args.do_train or train_args.do_eval:
+        if isinstance(features[label_column_name].feature, ClassLabel):
+            label_list = features[label_column_name].feature.names
+            label_to_id = {i: i for i in range(len(label_list))}
+        else:
+            data = tr_data["train"] if train_args.do_train else ev_data['dev']
+            label_list = get_label_list(data[label_column_name])
+            label_to_id = {l: i for i, l in enumerate(label_list)}
+
+    max_seq_length = min(extra_args.max_seq_length, tokenizer.model_max_length)
 
     # loading a tokenizer for tokenizing the input
     def tokenize(examples):
         print('\n------------------------------------------label\n', label_list, '\n------------------------------------------Label to id\n', label_to_id)
-        max_seq_length = min(extra_args.max_seq_length, tokenizer.model_max_length)
         tokenized_encodings = tokenizer(examples[text_column_name]) if extra_args.pretrained_model.lower() == 'gpt2' \
             else tokenizer(examples[text_column_name],  max_length=max_seq_length,  truncation=True, padding=True, is_split_into_words=True, return_special_tokens_mask=True)
         tokenized_encodings['labels'] = tokenized_encodings.input_ids.copy()
@@ -438,22 +443,14 @@ def main(args):
             for word_idx in word_ids:
                 # Special tokens have a word id that is None. We set the label to -100 so they are automatically ignored in the loss function.
                 if word_idx is None:
-                    # print('if 1', word_idx)
                     label_ids.append(-100)
                 # We set the label for the first token of each word.
                 elif word_idx != previous_word_idx:
-                    # print('else 1', word_idx, label, label[word_idx])
                     label_ids.append(label_to_id[label[word_idx]])
                 # For the other tokens in a word, we set the label to either the current label or -100, depending on the label_all_tokens flag.
                 else:
-                    # print('else 2', word_idx, label, label[word_idx])
                     label_ids.append(label_to_id[label[word_idx]] if extra_args.label_all_tokens else -100)
                 previous_word_idx = word_idx
-            # if i < 4:
-            #     print(i, len(examples[text_column_name][i]), examples[text_column_name][i])
-            #     print(i, len(word_ids), word_ids)
-            #     print(i, len(label), label)
-            #     print(i, len(label_ids), label_ids)
             labels.append(label_ids)
         tokenized_encodings["ner_labels"] = labels
         return tokenized_encodings
@@ -473,12 +470,27 @@ def main(args):
                         reformulated_tokenized_input[m].append(v)
         return reformulated_tokenized_input
 
+    # max_seq_length.
+    def group_texts(examples):
+        # Concatenate all texts.
+        concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
+        # customize this part to your needs.
+        if total_length >= max_seq_length:
+            total_length = (total_length // max_seq_length) * max_seq_length
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i: i + max_seq_length] for i in range(0, total_length, max_seq_length)]
+            for k, t in concatenated_examples.items()
+        }
+        return result
+
     #tokenise and prepare dataset for training
     if train_args.do_train:
         print('Here is the tr data before tokenization', tr_data)
         tokenized_input = tr_data.map(tokenize, batched=True, desc="Running tokenizer on train data")
         train_tokenized_data = tokenized_input['train']
-        print('Have a look at whats been tokenized', tr_data, train_args)
         for i in train_tokenized_data:
             print(i)
             break
@@ -488,22 +500,24 @@ def main(args):
                                              mask=extra_args.custom_mask)
         if extra_args.trainer_api:
             train_data = train_data.remove_columns(['ner_labels', 'tokens', 'ner_tags', 'token_type_ids', 'labels'])
-            print(type(train_data))
-            for i in train_data:
-                print(i)
-                break
-        else:
-            train_data = train_data.remove_columns(['tokens', 'ner_tags'])
         # train_data = Outcome_Dataset(train_data)
         print(train_data)
         print(type(train_data))
 
     if train_args.do_eval:
-        eval_dataset, eval_dataset_labels = prepare_data.fetch_data(extra_args, files=[extra_args.data + '/dev.txt'])
-        eval_tokenized_input = tokenize(eval_dataset, tokenizer, extra_args.pretrained_model)
-        if extra_args.custom_mask:
-            eval_tokenized_input = outcome_mask.custom_mask(tokenizer=tokenizer, tokenized_input=eval_tokenized_input, dataset=eval_dataset, dataset_labels=eval_dataset_labels, model=extra_args.pretrained_model)
-        eval_data = Outcome_Dataset(eval_tokenized_input)
+        print('Here is the tr data before tokenization', ev_data)
+        tokenized_input = ev_data.map(tokenize, batched=True, desc="Running tokenizer on train data")
+        tokenized_input = tokenized_input.map(group_texts, batched=True, desc="Grouping texts in chunks of {}".format(max_seq_length))
+        ev_tokenized_data = tokenized_input['dev']
+        eval_data = outcome_mask.customMask(ev_tokenized_data,
+                                            tokenizer=tokenizer,
+                                            labels_list=label_list,
+                                            mask=extra_args.custom_mask)
+        if extra_args.trainer_api:
+            eval_data = eval_data.remove_columns(['ner_labels', 'tokens', 'ner_tags', 'token_type_ids', 'labels'])
+
+        print(eval_data)
+        print(type(eval_data))
 
     #training and evaluation
     if train_args.do_train:
@@ -512,8 +526,9 @@ def main(args):
     #fill in masked tokens
     if extra_args.do_fill:
         #data should be a file in which we intend to fill in unknown of a prompt
-        eval_model = AutoModelForMaskedLM.from_pretrained(train_args.output_dir)
-        eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data+'dev.txt')
+        eval_model = AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
+        eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data + '/dev.txt')
+        # ev_data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data + '/dev.txt'])
         evaluate(data=eval_data, labels=eval_data_labels, train_args=train_args, model=eval_model, tokenizer=tokenizer)
 
     #evlauate filling task
