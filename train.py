@@ -118,7 +118,7 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=True,
-        mlm_probability=0.15 if not extra_args.custom_mask else 0.0
+        mlm_probability=0.15 if not extra_args.custom_mask else 0.15
     )
     #use the hugging face trainer API
     if extra_args.trainer_api:
@@ -136,7 +136,7 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
             data_collator=data_collator,
             tokenizer=tokenizer,
         )
-        train_result = trainer.train() if train_args.resume_from_checkpoint is None else trainer.train(resume_from_checkpoint=train_args.resume_from_checkpoint)
+        train_result = trainer.train(resume_from_checkpoint=None) if train_args.resume_from_checkpoint is None else trainer.train(resume_from_checkpoint=train_args.resume_from_checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
         metrics = train_result.metrics
         metrics["train_samples"] = len(train_data)
@@ -145,6 +145,7 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
         trainer.save_state()
 
         if train_args.do_eval:
+            print("---------------------------------------Evaluate-------------------------------------------")
             eval_results = trainer.evaluate()
             eval_results["eval_samples"] = len(eval_data)
             try:
@@ -179,36 +180,45 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
         train_data = train_data.remove_columns(['tokens', 'ner_tags', 'token_type_ids', 'labels'])
         eval_data = eval_data.remove_columns(['tokens', 'ner_tags', 'token_type_ids', 'labels'])
         print("\n\n\n------Before dataloader 2-------\n\n---{}-------\n\n\n---------{}".format(train_data, type(train_data)))
-        train_loader = DataLoader(train_data, batch_size=train_args.per_device_train_batch_size, collate_fn=data_collator if not extra_args.custom_mask else None)
-        eval_loader = DataLoader(eval_data, batch_size=train_args.per_device_eval_batch_size, collate_fn=data_collator if not extra_args.custom_mask else None)
+        if extra_args.custom_mask:
+            train_loader = torch.utils.data.DataLoader(train_data, batch_size=train_args.per_device_train_batch_size)
+            eval_loader = torch.utils.data.DataLoader(eval_data, batch_size=train_args.per_device_eval_batch_size)
+        else:
+            train_loader = DataLoader(train_data, batch_size=train_args.per_device_train_batch_size, collate_fn=data_collator)
+            eval_loader = DataLoader(eval_data, batch_size=train_args.per_device_eval_batch_size, collate_fn=data_collator)
         optim = AdamW(optimizer_grouped_parameters, lr=train_args.learning_rate)
 
-        for t in train_loader:
-            print(t)
-            for x,y in t.items():
-                print(x, y.shape)
-            break
+        # for t in train_loader:
+        #     print(t)
+        #     for x,y in t.items():
+        #         print(x, y.shape)
+        #         if x == 'input_ids':
+        #             for i in y:
+        #                 print(i)
+        #                 print(i.shape)
+        #                 break
+        #             # print(PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=y[0]))
+        #     break
         for epoch in range(int(train_args.num_train_epochs)):
-            # training_loop = tqdm(train_loader, leave=True)
             model.train()
-            for step, batch in enumerate(train_loader):
+            training_loop = tqdm(train_loader, leave=True)
+            for i, batch in enumerate(training_loop):
                 optim.zero_grad()
-                print(type(batch))
-                for i in batch:
-                    print(i)
-                    print('herhererher', batch[i].shape, type(batch[i]))
-                    print(batch[i][:4, :5])
+                print(batch)
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
                 labels = batch['labels'].to(device)
-                batch = transformers.BatchEncoding({'attention_mask':attention_mask, 'input_ids':input_ids, 'labels':labels})
+                ner_labels = batch['ner_labels'].to(device)
+                for j in input_ids:
+                    print(j)
+                    break
+                # batch = transformers.BatchEncoding({'attention_mask':attention_mask, 'input_ids':input_ids, 'labels':labels})
                 print(input_ids.shape, attention_mask.shape, labels.shape)
-                outputs = model(**batch)
+                outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
                 #loss
                 loss = outputs.loss
                 loss = loss / train_args.gradient_accumulation_steps
-                logger.info(f"step {step}: loss: {loss}")
-                print('loss:', loss)
+                print("step {}: loss: {}".format(i, loss))
                 loss.backward()
                 optim.step()
                 #output
@@ -221,37 +231,37 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
                 #     print(tokenizer.convert_tokens_to_string(tokens))
                 break
 
-                # if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                #     optimizer.step()
-                #     lr_scheduler.step()
-                #     optimizer.zero_grad()
-                #     progress_bar.update(1)
-                #     completed_steps += 1
-                #
-                # if completed_steps >= args.max_train_steps:
-                #     break
-            model.eval()
-            losses = []
-            for step, batch in enumerate(eval_loader):
-                with torch.no_grad():
-                    input_ids = batch['input_ids'].to(device)
-                    attention_mask = batch['attention_mask'].to(device)
-                    labels = batch['labels'].to(device)
-                    batch = transformers.BatchEncoding(
-                        {'attention_mask': attention_mask, 'input_ids': input_ids, 'labels': labels})
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss
-                losses.append(loss)
-                # losses.append(accelerator.gather(loss.repeat(args.per_device_eval_batch_size)))
-
-            losses = torch.cat(losses)
-            losses = losses[: len(eval_data)]
-            try:
-                perplexity = math.exp(torch.mean(losses))
-            except OverflowError:
-                perplexity = float("inf")
-            print()
-            logger.info(f"epoch {epoch}: perplexity: {perplexity}")
+            #     # if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+            #     #     optimizer.step()
+            #     #     lr_scheduler.step()
+            #     #     optimizer.zero_grad()
+            #     #     progress_bar.update(1)
+            #     #     completed_steps += 1
+            #     #
+            #     # if completed_steps >= args.max_train_steps:
+            #     #     break
+            # model.eval()
+            # losses = []
+            # for step, batch in enumerate(eval_loader):
+            #     with torch.no_grad():
+            #         input_ids = batch['input_ids'].to(device)
+            #         attention_mask = batch['attention_mask'].to(device)
+            #         labels = batch['labels'].to(device)
+            #         batch = transformers.BatchEncoding(
+            #             {'attention_mask': attention_mask, 'input_ids': input_ids, 'labels': labels})
+            #         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            #     loss = outputs.loss
+            #     losses.append(loss)
+            #     # losses.append(accelerator.gather(loss.repeat(args.per_device_eval_batch_size)))
+            #
+            # losses = torch.cat(losses)
+            # losses = losses[: len(eval_data)]
+            # try:
+            #     perplexity = math.exp(torch.mean(losses))
+            # except OverflowError:
+            #     perplexity = float("inf")
+            # print()
+            # logger.info(f"epoch {epoch}: perplexity: {perplexity}")
 
         # if args.output_dir is not None:
         #     accelerator.wait_for_everyone()
@@ -411,6 +421,8 @@ def main(args):
         column_names = tr_data['train'].column_names
         text_column_name = "tokens" if "tokens" in column_names else column_names[0]
         label_column_name = "ner_tags" if "ner_tags" in column_names else column_names[1]
+        labels = tr_data['train'].features[label_column_name].feature.names
+
     if train_args.do_eval:
         ev_data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data + '/dev.txt'])
         print(ev_data)
@@ -488,24 +500,23 @@ def main(args):
 
     #tokenise and prepare dataset for training
     if train_args.do_train:
-        print('Here is the tr data before tokenization', tr_data)
+        print('Here is the train data before tokenization', tr_data)
         tokenized_input = tr_data.map(tokenize, batched=True, desc="Running tokenizer on train data")
+        tokenized_input = tokenized_input.map(group_texts, batched=True, desc="Grouping texts in chunks of {}".format(max_seq_length))
         train_tokenized_data = tokenized_input['train']
-        for i in train_tokenized_data:
-            print(i)
-            break
+
         train_data = outcome_mask.customMask(train_tokenized_data,
                                              tokenizer=tokenizer,
                                              labels_list=label_list,
                                              mask=extra_args.custom_mask)
+
         if extra_args.trainer_api:
             train_data = train_data.remove_columns(['ner_labels', 'tokens', 'ner_tags', 'token_type_ids', 'labels'])
         # train_data = Outcome_Dataset(train_data)
-        print(train_data)
-        print(type(train_data))
+        print('Here is the train data before tokenization', train_data)
 
     if train_args.do_eval:
-        print('Here is the tr data before tokenization', ev_data)
+        print('Here is the eval data before tokenization', ev_data)
         tokenized_input = ev_data.map(tokenize, batched=True, desc="Running tokenizer on train data")
         tokenized_input = tokenized_input.map(group_texts, batched=True, desc="Grouping texts in chunks of {}".format(max_seq_length))
         ev_tokenized_data = tokenized_input['dev']
@@ -516,8 +527,7 @@ def main(args):
         if extra_args.trainer_api:
             eval_data = eval_data.remove_columns(['ner_labels', 'tokens', 'ner_tags', 'token_type_ids', 'labels'])
 
-        print(eval_data)
-        print(type(eval_data))
+        print('Here is the eval data before tokenization', train_data)
 
     #training and evaluation
     if train_args.do_train:
