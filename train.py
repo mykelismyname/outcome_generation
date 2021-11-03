@@ -53,7 +53,8 @@ import detection_model as detection
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
-logger = logging.getLogger(__name__)
+from datetime import datetime
+logging.basicConfig(level=logging.INFO)
 
 class Outcome_Dataset(torch.utils.data.Dataset):
     def __init__(self, encodings):
@@ -113,12 +114,27 @@ class ExtraArguments:
         metadata={
             "help": "opt to label all tokens or not after tokenization"},
     )
+    detection_loss: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "include an auxiliary cross entropy loss for outcome detection"},
+    )
+    det_batch_size: Optional[int] = field(
+        default=64,
+        metadata={
+            "help": "Batch size of the detection model"},
+    )
+    det_hidden_dim: Optional[int] = field(
+        default=768,
+        metadata={
+            "help": "Hidden state dimension of the detection model"},
+    )
     partial_contexts: Optional[bool] = field(
         default=False,
         metadata={"help":"train mlm with prompts having different contexts, where contexts refers to prompts of different freq occurence"},
     )
 
-def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
+def train(model, detection_model, det_criterion, train_data, eval_data, train_args, extra_args, tokenizer):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
@@ -161,8 +177,10 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
             trainer.log_metrics("eval", eval_results)
             trainer.save_metrics("eval", eval_results)
     else:
-        if not os.path.exists(train_args.output_dir):
-            os.makedirs(train_args.output_dir)
+        cur_date_time = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
+        save_dir = train_args.output_dir+'_'+cur_date_time
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
         #Split weights in two groups, one with weight decay and the other not.
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
@@ -201,8 +219,7 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
             eval_loader = DataLoader(eval_data, batch_size=train_args.per_device_eval_batch_size, collate_fn=data_collator)
         optim = AdamW(optimizer_grouped_parameters, lr=train_args.learning_rate)
 
-        # print(optimizer_grouped_parameters)
-        with open(os.path.join(train_args.output_dir, 'losses.txt'), 'w') as l:
+        with open(os.path.join(save_dir, 'losses.txt'), 'w') as l:
             loss_metrics = {'training':[],'val':[]}
             l.write('Train \t Val \t Perplexity\n')
             for epoch in range(int(train_args.num_train_epochs)):
@@ -216,15 +233,23 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
                     labels = batch['labels'].to(device)
                     ner_labels = batch['ner_labels'].to(device)
                     batch = transformers.BatchEncoding({'input_ids':input_ids, 'attention_mask':attention_mask, 'labels':labels})
-                    outputs = model(**batch)
-                    #loss
+                    outputs = model(**batch, output_hidden_states=True)
+                    # loss
                     loss = outputs.loss
-                    print('Train step {} loss {}'.format(step, loss))
-                    train_loss.append(float(loss))
+                    if extra_args.detection_loss:
+                        ner_preds = detection_model(outputs.hidden_states)
+                        assert ner_preds.size(0) == ner_labels.size(0)
+                        x, y = ner_labels.size()
+                        train_batch_losses = []
+                        for n in range(x):
+                            ner_loss = det_criterion(ner_preds[n], ner_labels[n])
+                            train_batch_losses.append(ner_loss)
+                        # print(loss, torch.mean(torch.stack(train_batch_losses)))
+                        loss = loss + torch.mean(torch.stack(train_batch_losses))
+                    train_loss.append(np.round(float(loss), 4))
                     loss.backward()
                     optim.step()
                 train_epoch_loss = np.mean(train_loss)
-                print('Epoch {} training loss {}'.format(epoch+1, train_epoch_loss))
                     # output_logits = outputs.logits
                 model.eval()
                 eval_losses = []
@@ -233,20 +258,31 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
                         input_ids = batch['input_ids'].to(device)
                         attention_mask = batch['attention_mask'].to(device)
                         labels = batch['labels'].to(device)
+                        ner_labels = batch['ner_labels'].to(device)
                         batch = transformers.BatchEncoding({'input_ids': input_ids, 'attention_mask': attention_mask, 'labels': labels})
-                        outputs = model(**batch)
-                    loss = outputs.loss
-                    print('Eval step {} loss {}'.format(step, loss))
-                    eval_losses.append(float(loss))
-                eval_epoch_loss = np.mean(eval_losses)
-                print('Epoch {} eval loss {}'.format(epoch+1, eval_epoch_loss))
+                        outputs = model(**batch, output_hidden_states=True)
+                        loss = outputs.loss
+                        if extra_args.detection_loss:
+                            ner_preds = detection_model(outputs.hidden_states)
+                            assert ner_preds.size(0) == ner_labels.size(0)
+                            x, y = ner_labels.size()
+                            eval_batch_losses = []
+                            for n in range(x):
+                                ner_loss = det_criterion(ner_preds[n], ner_labels[n])
+                                eval_batch_losses.append(ner_loss)
+                            loss = loss + torch.mean(torch.stack(eval_batch_losses))
+                    eval_losses.append(np.round(float(loss), 4))
+
+                eval_epoch_loss = torch.tensor(eval_losses)
+
                 try:
-                    perplexity = math.exp(np.mean(eval_losses))
+                    perplexity = math.exp(torch.mean(eval_epoch_loss))
                 except OverflowError:
                     perplexity = float("inf")
-                print("Epoch {}: perplexity: {}".format(epoch, perplexity))
+
+                logging.info("Epoch {}: perplexity: {}".format(epoch+1, perplexity))
                 loss_metrics['training'].append(train_epoch_loss)
-                loss_metrics['val'].append(eval_epoch_loss)
+                loss_metrics['val'].append(torch.mean(eval_epoch_loss))
                 l.write('{}\t{}\t{}\n'.format(train_epoch_loss, eval_epoch_loss, perplexity))
             loss_metrics['epochs'] = [i+1 for i in range(int(train_args.num_train_epochs))]
             log_metrics = pd.DataFrame(loss_metrics)
@@ -254,6 +290,9 @@ def train(model, train_data, eval_data, train_args, extra_args, tokenizer):
             sns.lineplot(data=log_metrics, x='epochs', y='val')
             plt.savefig(args.output_dir+'/loss.png')
             l.close()
+
+def pad_tensor(ts):
+    pass
 
 def evaluate(data, labels, train_args, model, tokenizer):
     seqs = []
@@ -377,7 +416,6 @@ def main(args):
                 AutoTokenizer.from_pretrained(extra_args.pretrained_model, add_prefix_space=True)
     model = GPT2Model.from_pretrained(extra_args.pretrained_model) if extra_args.pretrained_model.lower() == 'gpt2' else \
                 AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
-    # detection_model = detection.outcome_detection_model()
     model.to(device)
 
     print(train_args, '\n', extra_args)
@@ -516,7 +554,20 @@ def main(args):
 
     #training and evaluation
     if train_args.do_train:
-        train(model=model, train_data=train_data, eval_data=eval_data if train_args.do_eval else None, train_args=train_args, extra_args=extra_args, tokenizer=tokenizer)
+        # defining a detection model
+        if extra_args.detection_loss:
+            det_criterion = torch.nn.CrossEntropyLoss()
+            #add special token to labels based on the tokenization that incorporates expansion of the token ner_labels
+            label_list.append('special_token')
+            label_ids = [x for x,y in label_to_id.items()]
+            label_to_id[label_ids[-1]+1] = -100
+            detection_model = detection.outcome_detection_model(batch_size=extra_args.det_batch_size,
+                                                                hdim=extra_args.det_hidden_dim, token_ids=label_to_id)
+            detection_model.to(device)
+            det_params = detection_model.parameters()
+        else:
+            detection_model, det_criterion = None, None
+        train(model=model, detection_model=detection_model, det_criterion=det_criterion, train_data=train_data, eval_data=eval_data if train_args.do_eval else None, train_args=train_args, extra_args=extra_args, tokenizer=tokenizer)
 
     #fill in masked tokens
     if extra_args.do_fill:
@@ -553,6 +604,9 @@ if __name__ == '__main__':
     par.add_argument('--mention_frequency', default='outcome_occurrence.json', help='File with the outcome mention frequency.')
     par.add_argument('--recall_metric', default='exact_match', help='exact_match or partial_matial')
     par.add_argument('--trainer_api', action='store_true', help='use the trainer api')
+    par.add_argument('--detection_loss', action='store_true', help='include an auxiliary cross entropy loss for outcome detection')
+    par.add_argument('--det_batch_size', default=64, help='Batch size of the detection model')
+    par.add_argument('--det_hidden_dim', default=768, help='Hidden state dimension of the detection model')
     par.add_argument('--evaluation_strategy', default='steps', help='The evaluation strategy to adopt during training')
     par.add_argument('--label_all_tokens', action='store_true', help='opt to label all tokens or not after tokenization')
     par.add_argument('--partial_contexts', action='store_true', help='train mlm with prompts having different contexts, where contexts refers to prompts of different freq occurence')
