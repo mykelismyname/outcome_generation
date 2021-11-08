@@ -138,7 +138,7 @@ class ExtraArguments:
         default=0.001,
         metadata={"help":"Decay the auxilliary loss during training"}
     )
-    add_prefix: Optional[bool] = field(
+    add_marker_tokens: Optional[bool] = field(
         default=False,
         metadata={"help": "Trigger the f_prompt  function to insert marker tokens at start of prompt"}
     )
@@ -437,43 +437,6 @@ def fill_evaluation(data, labels, train_args, extra_args, model, tokenizer):
         json.dump(mem_accuracy_, mem_acc, indent=2)
         json.dump(facts, fc, indent=2)
 
-def add_prefix(instance):
-    k = []
-    x = 0
-    instance_len = len(instance['ner_tags'])
-    for u,v in enumerate(instance['ner_tags']):
-        if x == u:
-            o = []
-            if v > 0:
-                for m,n in enumerate(instance['ner_tags'][u:]):
-                    if n > 0:
-                        o.append((u+m,n))
-                        x += 1
-                    else:
-                        break
-                if o:
-                    k.append(list(zip(*o)))
-            else:
-                x+=1
-    if k:
-        if len(k) == 1:
-            # print(instance['ner_tags'])
-            # print(k)
-            if k[0][0][0] == 0:
-                instance['tokens'] = ['prefix_prompt'] + instance['tokens']
-            elif k[0][0][-1] == (instance_len-1):
-                instance['tokens'] = ['postfix_prompt'] + instance['tokens']
-            else:
-                instance['tokens'] = ['cloze_prompt'] + instance['tokens']
-            instance['ner_tags'] = [0] + instance['ner_tags']
-        else:
-            instance['tokens'] = ['mixed_prompt'] + instance['tokens']
-            instance['ner_tags'] = [0] + instance['ner_tags']
-    else:
-        instance['tokens'] = ['null_prompt'] + instance['tokens']
-        instance['ner_tags'] = [0] + instance['ner_tags']
-    return instance
-
 def main(args):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     parser = HfArgumentParser((ExtraArguments, TrainingArguments))
@@ -594,11 +557,72 @@ def main(args):
         }
         return result
 
+    def add_marker_tokens(instance):
+        k = []
+        input_ids = instance['input_ids']
+        special_tokens = tokenizer.additional_special_tokens
+        special_tokens_ids = tokenizer.additional_special_tokens_ids
+        instance_len = len(instance['ner_tags'])
+        x = 0
+        for u, v in enumerate(instance['ner_tags']):
+            if x == u:
+                o = []
+                if v > 0:
+                    for m, n in enumerate(instance['ner_tags'][u:]):
+                        if n > 0:
+                            o.append((u + m, n))
+                            x += 1
+                        else:
+                            break
+                    if o:
+                        k.append(list(zip(*o)))
+                else:
+                    x += 1
+        if k:
+            if len(k) == 1:
+                if k[0][0][0] == 0:
+                    #prefix_prompt
+                    instance['tokens'].insert(0, str(special_tokens[0]))
+                    instance['input_ids'].insert(1, special_tokens_ids[0])
+                    instance['labels'].insert(1, special_tokens_ids[0])
+                elif k[0][0][-1] == (instance_len - 1):
+                    #postfix prompt
+                    instance['tokens'].insert(0, str(special_tokens[1]))
+                    instance['input_ids'].insert(1, special_tokens_ids[1])
+                    instance['labels'].insert(1, special_tokens_ids[1])
+                else:
+                    #cloze prompt
+                    instance['tokens'].insert(0, str(special_tokens[2]))
+                    instance['input_ids'].insert(1, special_tokens_ids[2])
+                    instance['labels'].insert(1, special_tokens_ids[2])
+            else:
+                #mixed prompt
+                instance['tokens'].insert(0, str(special_tokens[3]))
+                instance['input_ids'].insert(1, special_tokens_ids[3])
+                instance['labels'].insert(1, special_tokens_ids[3])
+        else:
+            #null prompt
+            instance['tokens'].insert(0, str(special_tokens[4]))
+            instance['input_ids'].insert(1, special_tokens_ids[4])
+            instance['labels'].insert(1, special_tokens_ids[4])
+
+        instance['attention_mask'].insert(1, 1)
+        instance['token_type_ids'].insert(1, 0)
+        instance['special_tokens_mask'].insert(1, 0)
+        instance['ner_labels'].insert(0, 0) #the detection label is O i.e. outside of tag hence id is 0
+        return instance
+
+    def prefixing(lst, items_and_ids, special_tokens, special_tokens_ids):
+        for i,v in items_and_ids.items():
+            if i == 'tokens':
+                lst[i].insert(0, special_tokens[v])
+            else:
+                lst[i].insert(1, special_tokens_ids[v])
+        return lst
+
     #tokenise and prepare dataset for training
     if train_args.do_train:
         print('Here is the train data before tokenization', tr_data)
-        #prompt engineering
-        # tr_data = tr_data.map(add_prefix)
         with accelerator.main_process_first():
             tokenized_input = tr_data.map(tokenize, batched=True, desc="Running tokenizer on train data")
         # tokenized_input = tokenized_input.map(group_texts, batched=True, desc="Grouping texts in chunks of {}".format(max_seq_length))
@@ -621,9 +645,11 @@ def main(args):
         tokenized_input = ev_data.map(tokenize, batched=True, desc="Running tokenizer on train data")
         # tokenized_input = tokenized_input.map(group_texts, batched=True, desc="Grouping texts in chunks of {}".format(max_seq_length))
         ev_tokenized_data = tokenized_input['dev']
+        print(extra_args.mask_id, type(extra_args.mask_id))
         eval_data = outcome_mask.customMask(ev_tokenized_data,
                                             tokenizer=tokenizer,
                                             labels_list=label_list,
+                                            mask_id=extra_args.mask_id,
                                             mask=extra_args.custom_mask)
         if extra_args.trainer_api:
             eval_data = eval_data.remove_columns(['ner_labels', 'tokens', 'ner_tags'])
@@ -645,6 +671,17 @@ def main(args):
             detection_args = (detection_model, det_criterion, detection_model.parameters())
         else:
             detection_args = None
+
+        # expand tokenizer vocabularly
+        if extra_args.add_marker_tokens:
+            special_tokens = {'additional_special_tokens':['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']}
+            num_added_toks = tokenizer.add_special_tokens(special_tokens)
+            model.resize_token_embeddings(len(tokenizer))
+            # prompt engineering
+            train_data = train_data.map(add_marker_tokens)
+            eval_data = eval_data.map(add_marker_tokens)
+
+        print(tokenizer.additional_special_tokens_ids, tokenizer.additional_special_tokens, label_to_id)
         # train(model=model, detection_args=detection_args, train_data=train_data, eval_data=eval_data if train_args.do_eval else None, train_args=train_args, extra_args=extra_args, tokenizer=tokenizer)
 
     #fill in masked tokens
@@ -687,7 +724,7 @@ if __name__ == '__main__':
     par.add_argument('--det_batch_size', default=64, help='Batch size of the detection model')
     par.add_argument('--det_hidden_dim', default=768, help='Hidden state dimension of the detection model')
     par.add_argument('--auxilliary_task_decay', default=0.001, help='Decay the auxilliary loss during training')
-    par.add_argument('--add_prefix', action='store_true', help='Trigger the f_prompt  function to insert marker tokens at start of prompt')
+    par.add_argument('--add_marker_tokens', action='store_true', help='Trigger the f_prompt  function to insert marker tokens at start of prompt')
     par.add_argument('--evaluation_strategy', default='steps', help='The evaluation strategy to adopt during training')
     par.add_argument('--label_all_tokens', action='store_true', help='opt to label all tokens or not after tokenization')
     par.add_argument('--partial_contexts', action='store_true', help='train mlm with prompts having different contexts, where contexts refers to prompts of different freq occurence')
