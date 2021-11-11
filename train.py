@@ -38,7 +38,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
     set_seed,
-    GPT2Tokenizer, GPT2TokenizerFast, GPT2Model,
+    GPT2Tokenizer, GPT2TokenizerFast, GPT2Model, GPT2LMHeadModel, T5ForConditionalGeneration, BartForConditionalGeneration,
     AdamW,
 )
 from torch.utils.data import DataLoader
@@ -151,8 +151,8 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
-        mlm=True,
-        mlm_probability=0.15 if not extra_args.custom_mask else 0.15
+        mlm_probability=0.15,
+        pad_to_multiple_of=None
     )
     if args.detection_loss:
         detection_model, detection_criterion, detection_params = detection_args
@@ -162,15 +162,14 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
         for i, j in enumerate(train_data):
             if i < 1:
                 print(j)
-                print(type(j))
-                for m,n in j.items():
-                    print(m,len(n))
+                for m, n in j.items():
+                    print(m, n.size())
         trainer = Trainer(
             model=model,
             args=train_args,
             train_dataset=train_data if train_args.do_train else None,
             eval_dataset=eval_data if train_args.do_eval else None,
-            data_collator=data_collator,
+            data_collator=data_collator if not extra_args.custom_mask else None,
             tokenizer=tokenizer
         )
         train_result = trainer.train(resume_from_checkpoint=None) if train_args.resume_from_checkpoint is None else trainer.train(resume_from_checkpoint=train_args.resume_from_checkpoint)
@@ -233,6 +232,8 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
             eval_loader = DataLoader(eval_data, batch_size=train_args.per_device_eval_batch_size, collate_fn=data_collator)
         optim = AdamW(optimizer_grouped_parameters, lr=train_args.learning_rate)
 
+        # alm_model = T5ForConditionalGeneration.from_pretrained('t5-small')
+        # alm_model.to(device)
         with open(os.path.join(train_args.output_dir, 'losses.txt'), 'w') as l:
             loss_metrics = {'training':[],'val':[]}
             l.write('Train \t Val \t Perplexity\n')
@@ -248,8 +249,12 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
                     ner_labels = batch['ner_labels'].to(device)
                     batch = transformers.BatchEncoding({'input_ids':input_ids, 'attention_mask':attention_mask, 'labels':labels})
                     outputs = model(**batch, output_hidden_states=True)
+                    # alm_outputs = alm_model(**batch, output_hidden_states=True)
                     # loss
                     loss = outputs.loss
+                    # alm_loss = alm_outputs.loss
+                    # logging.info("Step {}: Training MLM loss: {} and ALM loss: {}".format(step, loss, alm_loss))
+                    # logging.info("MLM hidden state shape: {} and ALM hidden shate shape : {}".format(alm_outputs.hidden_states[0].shape, outputs.hidden_states[0].shape))
                     if extra_args.detection_loss:
                         mlm_hidden_states = outputs.hidden_states
                         ner_preds = detection_model(mlm_hidden_states)
@@ -503,7 +508,7 @@ def main(args):
     def tokenize(examples):
         print('\n------------------------------------------label\n', label_list, '\n------------------------------------------Label to id\n', label_to_id)
         tokenized_encodings = tokenizer(examples[text_column_name]) if extra_args.pretrained_model.lower() == 'gpt2' \
-            else tokenizer(examples[text_column_name],  max_length=max_seq_length,  truncation=True, padding=True, is_split_into_words=True, return_special_tokens_mask=True)
+            else tokenizer(examples[text_column_name],  max_length=max_seq_length,  truncation=True, padding='max_length', is_split_into_words=True, return_special_tokens_mask=True)
         tokenized_encodings['labels'] = tokenized_encodings.input_ids.copy()
         labels = []
         print('Length of tokenized embeddings', len(tokenized_encodings))
@@ -627,16 +632,39 @@ def main(args):
             tokenized_input = tr_data.map(tokenize, batched=True, desc="Running tokenizer on train data")
         # tokenized_input = tokenized_input.map(group_texts, batched=True, desc="Grouping texts in chunks of {}".format(max_seq_length))
         train_tokenized_data = tokenized_input['train']
-
         train_data = outcome_mask.customMask(train_tokenized_data,
                                              tokenizer=tokenizer,
                                              labels_list=label_list,
-                                             mask_id=extra_args.mask_id,
+                                             mask_id=tokenizer.mask_token_id,
                                              mask=extra_args.custom_mask)
+
+        # expand tokenizer vocabularly
+        if extra_args.add_marker_tokens:
+            print('\n\nHeheheheheheheheheh\n\n')
+            for i, j in enumerate(train_data):
+                if i < 1:
+                    print(j)
+                    for m, n in j.items():
+                        print(m, len(n))
+            special_tokens = {'additional_special_tokens': ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']}
+            num_added_toks = tokenizer.add_special_tokens(special_tokens)
+            model.resize_token_embeddings(len(tokenizer))
+            # prompt engineering
+            train_data = train_data.map(add_marker_tokens)
+            for i, j in enumerate(train_data):
+                if i < 1:
+                    print(j)
+                    for m, n in j.items():
+                        print(m, len(n))
 
         if extra_args.trainer_api:
             print(train_data)
-            train_data = train_data.remove_columns(['ner_labels', 'tokens', 'ner_tags'])
+            train_data = train_data.remove_columns(['ner_labels', 'tokens', 'ner_tags', 'special_tokens_mask'])
+            train_dataset_dict = transformers.BatchEncoding(Dataset.to_dict(train_data))
+            train_data = Outcome_Dataset(train_dataset_dict)
+
+        for id in tokenizer.all_special_ids:
+            print(id, PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=id))
         # train_data = Outcome_Dataset(train_data)
         print('Here is the train data after tokenization', train_data)
 
@@ -649,10 +677,22 @@ def main(args):
         eval_data = outcome_mask.customMask(ev_tokenized_data,
                                             tokenizer=tokenizer,
                                             labels_list=label_list,
-                                            mask_id=extra_args.mask_id,
+                                            mask_id=tokenizer.mask_token_id,
                                             mask=extra_args.custom_mask)
+
+        # expand tokenizer vocabularly
+        if extra_args.add_marker_tokens:
+            special_tokens = {'additional_special_tokens': ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']}
+            num_added_toks = tokenizer.add_special_tokens(special_tokens)
+            model.resize_token_embeddings(len(tokenizer))
+            # prompt engineering
+            eval_data = eval_data.map(add_marker_tokens)
+
+
         if extra_args.trainer_api:
-            eval_data = eval_data.remove_columns(['ner_labels', 'tokens', 'ner_tags'])
+            eval_data = eval_data.remove_columns(['ner_labels', 'tokens', 'ner_tags', 'special_tokens_mask'])
+            eval_dataset_dict = transformers.BatchEncoding(Dataset.to_dict(eval_data))
+            eval_data = Outcome_Dataset(eval_dataset_dict)
 
         print('Here is the eval data after tokenization', train_data)
 
@@ -671,18 +711,9 @@ def main(args):
             detection_args = (detection_model, det_criterion, detection_model.parameters())
         else:
             detection_args = None
-
-        # expand tokenizer vocabularly
-        if extra_args.add_marker_tokens:
-            special_tokens = {'additional_special_tokens':['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']}
-            num_added_toks = tokenizer.add_special_tokens(special_tokens)
-            model.resize_token_embeddings(len(tokenizer))
-            # prompt engineering
-            train_data = train_data.map(add_marker_tokens)
-            eval_data = eval_data.map(add_marker_tokens)
-
-        print(tokenizer.additional_special_tokens_ids, tokenizer.additional_special_tokens, label_to_id)
-        # train(model=model, detection_args=detection_args, train_data=train_data, eval_data=eval_data if train_args.do_eval else None, train_args=train_args, extra_args=extra_args, tokenizer=tokenizer)
+        for id in tokenizer.all_special_ids:
+            print(id, PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=id))
+        train(model=model, detection_args=detection_args, train_data=train_data, eval_data=eval_data if train_args.do_eval else None, train_args=train_args, extra_args=extra_args, tokenizer=tokenizer)
 
     #fill in masked tokens
     if extra_args.do_fill:
@@ -708,13 +739,13 @@ if __name__ == '__main__':
     par.add_argument('--fill_evaluation', action='store_true', help='Evaluate how well model recalls outcomes')
     par.add_argument('--output_dir', default='output', help='indicate where you want model and results to be stored')
     par.add_argument('--overwrite_output_dir', action='store_true', help='overwrite existing output directory')
-    par.add_argument('--pretrained_model', default='dmis-lab/biobert-v1.1', help='pre-trained model available via hugging face e.g. dmis-lab/biobert-v1.1')
+    par.add_argument('--pretrained_model', default='bert-base-uncased', help='pre-trained model available via hugging face e.g. dmis-lab/biobert-v1.1')
     par.add_argument('--num_train_epochs', default=3, help='number of training epochs')
     par.add_argument('--max_seq_length', default=256, help='Maximum length of a sequence')
     par.add_argument('--per_device_train_batch_size', default=16, help='training batch size')
     par.add_argument('--per_device_eval_batch_size', default=16, help='eval batch size')
     par.add_argument('--save_steps', default=1500, help='eval batch size')
-    par.add_argument('--mask_id', default=103, help='id for the special mask token')
+    par.add_argument('--mask_id', default=103, help='id for the special mask token 103-Bert, 50264-Roberta, 104-SciBERT')
     par.add_argument('--resume_from_checkpoint', default=None, help='location of most recent model checkpoint')
     par.add_argument('--custom_mask', action='store_true', help='specify tokens to mask and avoid using the data collator')
     par.add_argument('--mention_frequency', default='outcome_occurrence.json', help='File with the outcome mention frequency.')
