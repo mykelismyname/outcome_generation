@@ -237,6 +237,7 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
         with open(os.path.join(train_args.output_dir, 'losses.txt'), 'w') as l:
             loss_metrics = {'training':[],'val':[]}
             l.write('Train \t Val \t Perplexity\n')
+            logging.info("\n--------------------TRAINING BEGINS--------------------\n")
             for epoch in range(int(train_args.num_train_epochs)):
                 model.train()
                 training_loop = tqdm(train_loader, leave=True)
@@ -270,6 +271,7 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
                     accelerator.backward(loss)
                     # loss.backward()
                     optim.step()
+
                 train_epoch_loss = np.mean(train_loss)
                 logging.info("Epoch {}: Training loss: {}".format(epoch+1, np.round(train_epoch_loss, 4)))
                 # output_logits = outputs.logits
@@ -323,8 +325,6 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
                 unwrapped_model.save_pretrained(train_args.output_dir, save_function=accelerator.save)
                 if accelerator.is_main_process:
                     tokenizer.save_pretrained(train_args.output_dir)
-            # torch.save(model, 'mlruns/')
-
 
 def pad_tensor(ts):
     pass
@@ -563,11 +563,16 @@ def main(args):
         return result
 
     def add_marker_tokens(instance):
+        """
+        Insert marker tokens to the start of a prompt sequence. These tokens indicate what type of prompt/prompt pattern, prefix/postfix/cloze/mixed and null prompt
+        """
         k = []
         input_ids = instance['input_ids']
         special_tokens = tokenizer.additional_special_tokens
         special_tokens_ids = tokenizer.additional_special_tokens_ids
         instance_len = len(instance['ner_tags'])
+
+        #check where outcomes are within the prompt
         x = 0
         for u, v in enumerate(instance['ner_tags']):
             if x == u:
@@ -611,10 +616,11 @@ def main(args):
             instance['input_ids'].insert(1, special_tokens_ids[4])
             instance['labels'].insert(1, special_tokens_ids[4])
 
-        instance['attention_mask'].insert(1, 1)
-        instance['token_type_ids'].insert(1, 0)
+        instance['attention_mask'].insert(1, 1) #all tokens to be attended to should be 1 otherwise 0
+        if 'token_type_ids' in instance:
+            instance['token_type_ids'].insert(1, 0) #first sequence has all it's tokens represented with 0 and second sequence are 1's
         instance['special_tokens_mask'].insert(1, 0)
-        instance['ner_labels'].insert(0, 0) #the detection label is O i.e. outside of tag hence id is 0
+        instance['ner_labels'].insert(1, 0) #the detection label is O i.e. outside of tag hence id is 0
         return instance
 
     def prefixing(lst, items_and_ids, special_tokens, special_tokens_ids):
@@ -640,12 +646,11 @@ def main(args):
 
         # expand tokenizer vocabularly
         if extra_args.add_marker_tokens:
-            print('\n\nHeheheheheheheheheh\n\n')
+            print(train_data,'\n')
             for i, j in enumerate(train_data):
                 if i < 1:
                     print(j)
-                    for m, n in j.items():
-                        print(m, len(n))
+                    print('\n')
             special_tokens = {'additional_special_tokens': ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']}
             num_added_toks = tokenizer.add_special_tokens(special_tokens)
             model.resize_token_embeddings(len(tokenizer))
@@ -654,8 +659,7 @@ def main(args):
             for i, j in enumerate(train_data):
                 if i < 1:
                     print(j)
-                    for m, n in j.items():
-                        print(m, len(n))
+                    print('\n')
 
         if extra_args.trainer_api:
             print(train_data)
@@ -682,9 +686,6 @@ def main(args):
 
         # expand tokenizer vocabularly
         if extra_args.add_marker_tokens:
-            special_tokens = {'additional_special_tokens': ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']}
-            num_added_toks = tokenizer.add_special_tokens(special_tokens)
-            model.resize_token_embeddings(len(tokenizer))
             # prompt engineering
             eval_data = eval_data.map(add_marker_tokens)
 
