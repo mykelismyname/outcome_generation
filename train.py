@@ -38,7 +38,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
     set_seed,
-    GPT2Tokenizer, GPT2TokenizerFast, GPT2Model, GPT2LMHeadModel, T5ForConditionalGeneration, BartForConditionalGeneration,
+    GPT2Tokenizer, GPT2TokenizerFast, GPT2Model, GPT2LMHeadModel, T5ForConditionalGeneration, T5Tokenizer, BartForConditionalGeneration,
     AdamW,
 )
 from torch.utils.data import DataLoader
@@ -50,6 +50,7 @@ from accelerate import Accelerator, DistributedType
 from tqdm import tqdm
 from time import sleep
 import detection_model as detection
+import prompt_model as prompt_model
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -142,21 +143,23 @@ class ExtraArguments:
         default=False,
         metadata={"help": "Trigger the f_prompt  function to insert marker tokens at start of prompt"}
     )
+    alm: Optional[bool] = field(
+        default=False,
+        metadata={"help": "amalgamate auto-regressive model hidden states"}
+    )
     mask_id: int = field(
         default=103,
         metadata={"help": "id for the special mask token"}
     )
 
-def train(model, detection_args, train_data, eval_data, train_args, extra_args, tokenizer):
+def train(model, alm_args, detection_args, train_data, eval_data, train_args, extra_args, tokenizer):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm_probability=0.15,
         pad_to_multiple_of=None
     )
-    if args.detection_loss:
-        detection_model, detection_criterion, detection_params = detection_args
-        detection_model.to(device)
+
     #use the hugging face trainer API
     if extra_args.trainer_api:
         for i, j in enumerate(train_data):
@@ -232,6 +235,11 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
             eval_loader = DataLoader(eval_data, batch_size=train_args.per_device_eval_batch_size, collate_fn=data_collator)
         optim = AdamW(optimizer_grouped_parameters, lr=train_args.learning_rate)
 
+        if extra_args.detection_loss:
+            detection_model, detection_criterion, detection_params = detection_args
+        if extra_args.alm:
+            pretrained_alm, alm_model = alm_args
+
         # alm_model = T5ForConditionalGeneration.from_pretrained('t5-small')
         # alm_model.to(device)
         with open(os.path.join(train_args.output_dir, 'losses.txt'), 'w') as l:
@@ -249,24 +257,19 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
                     labels = batch['labels'].to(device)
                     ner_labels = batch['ner_labels'].to(device)
                     batch = transformers.BatchEncoding({'input_ids':input_ids, 'attention_mask':attention_mask, 'labels':labels})
+
                     outputs = model(**batch, output_hidden_states=True)
-                    # alm_outputs = alm_model(**batch, output_hidden_states=True)
+                    if extra_args.alm:
+                        pretrained_alm_outputs = pretrained_alm(**batch, output_hidden_states=True)
+                        preds = alm_model(outputs.hidden_states, pretrained_alm_outputs.hidden_states)
                     # loss
-                    loss = outputs.loss
+                    mlm_loss = outputs.loss
                     # alm_loss = alm_outputs.loss
-                    # logging.info("Step {}: Training MLM loss: {} and ALM loss: {}".format(step, loss, alm_loss))
-                    # logging.info("MLM hidden state shape: {} and ALM hidden shate shape : {}".format(alm_outputs.hidden_states[0].shape, outputs.hidden_states[0].shape))
                     if extra_args.detection_loss:
                         mlm_hidden_states = outputs.hidden_states
-                        ner_preds = detection_model(mlm_hidden_states)
-                        assert ner_preds.size(0) == ner_labels.size(0)
-                        x, y = ner_labels.size()
-                        train_batch_losses = []
-                        # print(ner_preds.shape, ner_labels.shape)
-                        for n in range(x):
-                            ner_loss = detection_criterion(ner_preds[n], ner_labels[n])
-                            train_batch_losses.append(ner_loss)
-                        loss = loss + torch.mean(torch.stack(train_batch_losses))
+                        ner_batch_losses = detection_model(input_ids, mlm_hidden_states, ner_labels, mode='average')
+                    # logging.info("Step {}: Training MLM loss: {}, {} and ALM loss: {}".format(step, mlm_loss, ner_batch_losses, torch.mean(torch.stack(ner_batch_losses))))
+                    loss = mlm_loss + (extra_args.auxilliary_task_decay * torch.mean(torch.stack(ner_batch_losses))) if extra_args.detection_loss else mlm_loss
                     train_loss.append(float(loss))
                     accelerator.backward(loss)
                     # loss.backward()
@@ -287,17 +290,11 @@ def train(model, detection_args, train_data, eval_data, train_args, extra_args, 
                         ner_labels = batch['ner_labels'].to(device)
                         batch = transformers.BatchEncoding({'input_ids': input_ids, 'attention_mask': attention_mask, 'labels': labels})
                         outputs = model(**batch, output_hidden_states=True)
-                        loss = outputs.loss
+                        mlm_loss = outputs.loss
                         if extra_args.detection_loss:
                             mlm_hidden_states = outputs.hidden_states
-                            ner_preds = detection_model(mlm_hidden_states)
-                            assert ner_preds.size(0) == ner_labels.size(0)
-                            x, y = ner_labels.size()
-                            eval_batch_losses = []
-                            for n in range(x):
-                                ner_loss = detection_criterion(ner_preds[n], ner_labels[n])
-                                eval_batch_losses.append(ner_loss)
-                            loss = loss + torch.mean(torch.stack(eval_batch_losses))
+                            ner_batch_losses = detection_model(input_ids, mlm_hidden_states, ner_labels, mode='average')
+                        loss = mlm_loss + (extra_args.auxilliary_task_decay * torch.mean(torch.stack(ner_batch_losses))) if extra_args.detection_loss else mlm_loss
                     eval_loss.append(float(loss))
 
                 eval_epoch_loss = np.mean(eval_loss)
@@ -446,14 +443,17 @@ def main(args):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     parser = HfArgumentParser((ExtraArguments, TrainingArguments))
     extra_args, train_args = parser.parse_args_into_dataclasses()
-    tokenizer = GPT2TokenizerFast.from_pretrained(extra_args.pretrained_model) if extra_args.pretrained_model.lower() == 'gpt2' else \
-                AutoTokenizer.from_pretrained(extra_args.pretrained_model, add_prefix_space=True)
-    model = GPT2Model.from_pretrained(extra_args.pretrained_model) if extra_args.pretrained_model.lower() == 'gpt2' else \
-                AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
+    tokenizer = AutoTokenizer.from_pretrained(extra_args.pretrained_model, add_prefix_space=True)
+    model = AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
     model.to(device)
+    if extra_args.alm:
+        pretrained_alm = T5ForConditionalGeneration.from_pretrained('t5-small')
+        pretrained_alm_tokenizer = T5Tokenizer.from_pretrained('t5-small')
+        pretrained_alm.to(device)
 
     cur_date_time = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
-    train_args.output_dir= train_args.output_dir + '_' + cur_date_time
+    if not extra_args.fill_evaluation:
+        train_args.output_dir= train_args.output_dir + '_' + cur_date_time
 
     print(train_args, '\n', extra_args)
     print('---------------------------------------Read and Tokenize the data-------------------------------------------')
@@ -631,6 +631,21 @@ def main(args):
                 lst[i].insert(1, special_tokens_ids[v])
         return lst
 
+    def optimization():
+        weights = []
+        for n, p in model.named_parameters():
+            parameter_modified = False
+            for q, r in detection_model.named_parameters():
+                if q == 'output.weight':
+                    for i in range(r.size(0)):
+                        if str(n).__contains__(str(i)):
+                            p = p + r
+                            weights.append(p)
+                            parameter_modified = True
+            if not parameter_modified:
+                weights.append(p)
+            break
+
     #tokenise and prepare dataset for training
     if train_args.do_train:
         print('Here is the train data before tokenization', tr_data)
@@ -646,11 +661,6 @@ def main(args):
 
         # expand tokenizer vocabularly
         if extra_args.add_marker_tokens:
-            print(train_data,'\n')
-            for i, j in enumerate(train_data):
-                if i < 1:
-                    print(j)
-                    print('\n')
             special_tokens = {'additional_special_tokens': ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']}
             num_added_toks = tokenizer.add_special_tokens(special_tokens)
             model.resize_token_embeddings(len(tokenizer))
@@ -699,22 +709,39 @@ def main(args):
 
     #training and evaluation
     if train_args.do_train:
+        # defining a complementary Autoregressive language model
+        if extra_args.alm:
+            alm_model = prompt_model.prompt_model(hdim=extra_args.det_hidden_dim, vocab_size=tokenizer.vocab_size)
+            alm_model.to(device)
+            alm_args = (pretrained_alm, alm_model)
+        else:
+            alm_args = None
+
         # defining a detection model
         if extra_args.detection_loss:
             #add special token to labels based on the tokenization that incorporates expansion of the token ner_labels
+            det_criterion = torch.nn.CrossEntropyLoss()
             label_list.append('special_token')
             label_ids = [x for x,y in label_to_id.items()]
             label_to_id[label_ids[-1]+1] = -100
             detection_model = detection.outcome_detection_model(batch_size=extra_args.det_batch_size,
                                                                 hdim=extra_args.det_hidden_dim,
+                                                                tokenizer=tokenizer,
+                                                                det_criterion=det_criterion,
                                                                 token_ids=label_to_id)
-            det_criterion = torch.nn.CrossEntropyLoss()
+            detection_model.to(device)
             detection_args = (detection_model, det_criterion, detection_model.parameters())
         else:
             detection_args = None
-        for id in tokenizer.all_special_ids:
-            print(id, PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=id))
-        train(model=model, detection_args=detection_args, train_data=train_data, eval_data=eval_data if train_args.do_eval else None, train_args=train_args, extra_args=extra_args, tokenizer=tokenizer)
+
+        train(model=model,
+              alm_args=alm_args,
+              detection_args=detection_args,
+              train_data=train_data,
+              eval_data=eval_data if train_args.do_eval else None,
+              train_args=train_args,
+              extra_args=extra_args,
+              tokenizer=tokenizer)
 
     #fill in masked tokens
     if extra_args.do_fill:
@@ -756,6 +783,7 @@ if __name__ == '__main__':
     par.add_argument('--det_batch_size', default=64, help='Batch size of the detection model')
     par.add_argument('--det_hidden_dim', default=768, help='Hidden state dimension of the detection model')
     par.add_argument('--auxilliary_task_decay', default=0.001, help='Decay the auxilliary loss during training')
+    par.add_argument('--alm', action='store_true', help='amalgamate auto-regressive model hidden states')
     par.add_argument('--add_marker_tokens', action='store_true', help='Trigger the f_prompt  function to insert marker tokens at start of prompt')
     par.add_argument('--evaluation_strategy', default='steps', help='The evaluation strategy to adopt during training')
     par.add_argument('--label_all_tokens', action='store_true', help='opt to label all tokens or not after tokenization')
