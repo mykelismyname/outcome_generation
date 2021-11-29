@@ -591,22 +591,22 @@ def main(args):
         if k:
             if len(k) == 1:
                 if k[0][0][0] == 0:
-                    #prefix_prompt
-                    instance['tokens'].insert(0, str(special_tokens[0]))
-                    instance['input_ids'].insert(1, special_tokens_ids[0])
-                    instance['labels'].insert(1, special_tokens_ids[0])
-                elif k[0][0][-1] == (instance_len - 1):
-                    #postfix prompt
+                    #postfix_prompt because the outcome appears at the start of prompt and context follows
                     instance['tokens'].insert(0, str(special_tokens[1]))
                     instance['input_ids'].insert(1, special_tokens_ids[1])
                     instance['labels'].insert(1, special_tokens_ids[1])
+                elif k[0][0][-1] == (instance_len - 1):
+                    #prefix prompt because the outcome appears at the end of prompt and context before
+                    instance['tokens'].insert(0, str(special_tokens[0]))
+                    instance['input_ids'].insert(1, special_tokens_ids[0])
+                    instance['labels'].insert(1, special_tokens_ids[0])
                 else:
-                    #cloze prompt
+                    #cloze prompt because the outcome appears in the middle of prompt and context surrounds it
                     instance['tokens'].insert(0, str(special_tokens[2]))
                     instance['input_ids'].insert(1, special_tokens_ids[2])
                     instance['labels'].insert(1, special_tokens_ids[2])
             else:
-                #mixed prompt
+                #mixed prompt because there is multiple outcomes to unmask within a prompt
                 instance['tokens'].insert(0, str(special_tokens[3]))
                 instance['input_ids'].insert(1, special_tokens_ids[3])
                 instance['labels'].insert(1, special_tokens_ids[3])
@@ -755,6 +755,7 @@ def main(args):
     if extra_args.fill_evaluation:
         model = AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
         eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data)
+        data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data])
         tokenizer = AutoTokenizer.from_pretrained(extra_args.pretrained_model)
         fill_evaluation(data=eval_data, labels=eval_data_labels, train_args=train_args, extra_args=extra_args, model=model, tokenizer=tokenizer)
 
