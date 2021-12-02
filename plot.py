@@ -153,28 +153,61 @@ def fewshot_visualization(args):
     frequency_ranges = []
     print(max_frequency)
     m = 1
-    for n in np.arange(10, 71, 10):
+    for n in np.arange(10, max_frequency+1, 10):
         n = n+1
         frequency_ranges.append(range(m,n))
         m = n
 
-    z = np.zeros((4,len(frequency_ranges)))
+    accuracy_copy = accuracy.copy()
+    for a in accuracy_copy:
+        if len(accuracy[a]['Accuracy']) == 0:
+            accuracy.pop(a)
+
+    # z = np.zeros((len(accuracy),len(frequency_ranges)))
+    # for k,prompt_type in enumerate(accuracy):
+    #     pt = []
+    #     # print(prompt_type,'\n')
+    #     for v,rge in enumerate(frequency_ranges):
+    #         h,g = accuracy[prompt_type]['frequency'], accuracy[prompt_type]['Accuracy']
+    #         s = [(i,j) for i,j in zip(h,g) if i in rge]
+    #         # print(accuracy[prompt_type]['frequency'], list(rge))
+    #         # print(s)
+    #         if s:
+    #             s_mean = np.mean([[i[1]] for i in s])
+    #             z[k][v] = np.round(s_mean, 4)
+
+    quartiles = check_quartiles(args)
+    quartiles = sorted(list(quartiles))
+    quartiles.append(max_frequency)
+
+    z = np.zeros((len(accuracy), len(quartiles)))
+    z_columns = []
     for k,prompt_type in enumerate(accuracy):
         pt = []
-        print(prompt_type,'\n')
-        for v,rge in enumerate(frequency_ranges):
+        print(prompt_type)
+        b = 0
+        for v in range(len(quartiles)):
+            print(prompt_type, quartiles[v])
             h,g = accuracy[prompt_type]['frequency'], accuracy[prompt_type]['Accuracy']
-            s = [(i,j) for i,j in zip(h,g) if i in rge]
-            print(accuracy[prompt_type]['frequency'], list(rge))
+            s = [(i, j) for i, j in zip(h, g) if i in range(b, quartiles[v])]
+            quartile_name = '{}-{}'.format(b,quartiles[v])
+            print(accuracy[prompt_type]['frequency'], '{} - {}'.format(b, quartiles[v]))
             print(s)
             if s:
                 s_mean = np.mean([[i[1]] for i in s])
                 z[k][v] = np.round(s_mean, 4)
+            b = quartiles[v]
+            if quartile_name not in z_columns:
+                z_columns.append(quartile_name)
+        print('\n')
+
     z = z*100
     # print(z)
     # print(z.astype(int))
+    print(z_columns)
     z_frame = pd.DataFrame(z)
-    z_frame.columns = ['{}-{}'.format(i[0],i[-1]) for i in frequency_ranges]
+    # z_frame.columns = ['{}-{}'.format(i[0],i[-1]) for i in frequency_ranges]
+    z_frame.columns = z_columns
     z_frame.index = [i for i in accuracy]
     print(z_frame)
     ax = sns.heatmap(z_frame, annot=True, cmap="Greens", fmt='.2f', cbar_kws={'label': args.recall_metric})
@@ -207,6 +240,18 @@ def fewshot_visualization(args):
             ax.label_outer()
         plt.show()
 
+def check_quartiles(args):
+    outcomes_occurrence = json.load(open(args.outcome_occurence))
+    outcomes_occurrence = {k.split(' [SEP] ')[0].strip().lower(): v for k, v in outcomes_occurrence.items()}
+    outcomes_occurrence_list = list(set(list(outcomes_occurrence.values())))
+    lower_q = int(np.percentile(list(outcomes_occurrence_list), 75))
+    middle_q = int(np.percentile(list(outcomes_occurrence_list), 50))
+    upper_q = int(np.percentile(list(outcomes_occurrence_list), 25))
+    print('{}\nUpper percentile:-{}\nMiddle percentile:-{}\nLower percentile:-{}'.format(
+        outcomes_occurrence_list, lower_q, middle_q, upper_q
+    ))
+    return lower_q, middle_q, upper_q
+
 if __name__ == '__main__':
     par = argparse.ArgumentParser()
     par.add_argument('--outcome_occurence', default='data/ebm-comet/outcome_occurrence.json', help='source file with outcome frequence details')
@@ -226,6 +271,8 @@ if __name__ == '__main__':
         random_masking_custom_masking(f1=sys_args[1], f2=sys_args[2])
     elif args.function == 'fewshot_visualisation':
         fewshot_visualization(args)
+    elif args.function == 'check_quartiles':
+        check_quartiles(args)
 
 
 
