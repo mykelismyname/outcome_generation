@@ -151,6 +151,10 @@ class ExtraArguments:
         default=103,
         metadata={"help": "id for the special mask token"}
     )
+    detection_mode: Optional[str] = field(
+        default='average',
+        metadata={"help": "either select a average of the hidden states across all model layers or select last layer hidden states"}
+    )
 
 def train(model, alm_args, detection_args, train_data, eval_data, train_args, extra_args, tokenizer):
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -197,18 +201,27 @@ def train(model, alm_args, detection_args, train_data, eval_data, train_args, ex
     else:
         if not os.path.exists(train_args.output_dir):
             os.makedirs(train_args.output_dir)
+
+        #model parameters
+        if extra_args.detection_loss:
+            detection_model, detection_criterion, detection_params = detection_args
+        else:
+            detection_params = []
+
         #Split weights in two groups, one with weight decay and the other not.
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
-                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)] + list(detection_params),
                 "weight_decay": train_args.weight_decay,
             },
             {
-                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)] + list(detection_params),
                 "weight_decay": 0.0,
             },
         ]
+        optim = AdamW(optimizer_grouped_parameters, lr=train_args.learning_rate)
+
         print('\nType of Dataset\n', train_data)
         # Log a few random samples from the training set:
         for index in range(1):
@@ -267,8 +280,8 @@ def train(model, alm_args, detection_args, train_data, eval_data, train_args, ex
                     # alm_loss = alm_outputs.loss
                     if extra_args.detection_loss:
                         mlm_hidden_states = outputs.hidden_states
-                        ner_batch_losses = detection_model(input_ids, mlm_hidden_states, ner_labels, mode='average')
-                    # logging.info("Step {}: Training MLM loss: {}, {} and ALM loss: {}".format(step, mlm_loss, ner_batch_losses, torch.mean(torch.stack(ner_batch_losses))))
+                        ner_batch_losses = detection_model(input_ids, mlm_hidden_states, ner_labels, mode=extra_args.detection_mode)
+                    # logging.info("Step {}: Training MLM loss: {}, {} and Detection loss: {}".format(step, mlm_loss, ner_batch_losses, torch.mean(torch.stack(ner_batch_losses))))
                     loss = mlm_loss + (extra_args.auxilliary_task_decay * torch.mean(torch.stack(ner_batch_losses))) if extra_args.detection_loss else mlm_loss
                     train_loss.append(float(loss))
                     accelerator.backward(loss)
@@ -293,7 +306,7 @@ def train(model, alm_args, detection_args, train_data, eval_data, train_args, ex
                         mlm_loss = outputs.loss
                         if extra_args.detection_loss:
                             mlm_hidden_states = outputs.hidden_states
-                            ner_batch_losses = detection_model(input_ids, mlm_hidden_states, ner_labels, mode='average')
+                            ner_batch_losses = detection_model(input_ids, mlm_hidden_states, ner_labels, mode=extra_args.detection_mode)
                         loss = mlm_loss + (extra_args.auxilliary_task_decay * torch.mean(torch.stack(ner_batch_losses))) if extra_args.detection_loss else mlm_loss
                     eval_loss.append(float(loss))
 
@@ -646,6 +659,17 @@ def main(args):
                 weights.append(p)
             break
 
+    # extract examples and labels from a dataset split (train, dev or test)
+    def extract_examples_and_labels(dataset):
+        data, data_labels = [], []
+        id2label = dict([(m, n) for m, n in enumerate(dataset.features['ner_tags'].feature.names)])
+        for j in range(dataset.num_rows):
+            ed = ' '.join(dataset['tokens'][j])
+            edl = ' '.join([id2label[i] for i in dataset['ner_tags'][j]])
+            data.append(ed)
+            data_labels.append(edl)
+        return data, data_labels
+
     #tokenise and prepare dataset for training
     if train_args.do_train:
         print('Here is the train data before tokenization', tr_data)
@@ -747,17 +771,20 @@ def main(args):
     if extra_args.do_fill:
         #data should be a file in which we intend to fill in unknown of a prompt
         eval_model = AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
-        eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data + '/dev.txt')
-        # ev_data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data + '/dev.txt'])
+        # eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data + '/dev.txt')
+        data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data])
+        eval_data, eval_data_labels = extract_examples_and_labels(data['dev'])
         evaluate(data=eval_data, labels=eval_data_labels, train_args=train_args, model=eval_model, tokenizer=tokenizer)
 
     #evlauate filling task
     if extra_args.fill_evaluation:
         model = AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
-        eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data)
+        # eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data)
         data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data])
         tokenizer = AutoTokenizer.from_pretrained(extra_args.pretrained_model)
-        fill_evaluation(data=eval_data, labels=eval_data_labels, train_args=train_args, extra_args=extra_args, model=model, tokenizer=tokenizer)
+        for i in data:
+            eval_data, eval_data_labels = extract_examples_and_labels(data[i])
+            fill_evaluation(data=eval_data, labels=eval_data_labels, train_args=train_args, extra_args=extra_args, model=model, tokenizer=tokenizer)
 
 if __name__ == '__main__':
     par = ArgumentParser()
@@ -781,6 +808,7 @@ if __name__ == '__main__':
     par.add_argument('--recall_metric', default='exact_match', help='exact_match or partial_matial')
     par.add_argument('--trainer_api', action='store_true', help='use the trainer api')
     par.add_argument('--detection_loss', action='store_true', help='include an auxiliary cross entropy loss for outcome detection')
+    par.add_argument('--detection_mode', default='average', help='either select a average of the hidden states across all model layers or select last layer hidden states')
     par.add_argument('--det_batch_size', default=64, help='Batch size of the detection model')
     par.add_argument('--det_hidden_dim', default=768, help='Hidden state dimension of the detection model')
     par.add_argument('--auxilliary_task_decay', default=0.001, help='Decay the auxilliary loss during training')
