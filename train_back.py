@@ -257,15 +257,16 @@ def train(model, detection_model, mlm_args, train_data, eval_data, train_args, e
                                                                  add_marker_tokens=extra_args.add_marker_tokens,
                                                                  prompt_conditioning=False)
                     # print(batch_probs_preds.shape, input_ids.shape, labels.shape)
-                    if extra_args.add_marker_tokens:
-                        labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
-                        ner_labels = torch.cat((ner_labels[:, :1], ner_labels[:, 2:]), axis=1)
+                    # if extra_args.add_marker_tokens:
+                    #     labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
+                    #     ner_labels = torch.cat((ner_labels[:, :1], ner_labels[:, 2:]), axis=1)
 
                     batch_loss = mlm_criterion(batch_probs_preds.view(-1, batch_probs_preds.size(-1)), labels.view(-1))
                     # print('batch_loss', batch_loss)
                     if extra_args.detection_loss:
                         ner_batch_preds = detection_model(hidden_output)
                         det_loss = mlm_criterion(ner_batch_preds.view(-1, ner_batch_preds.size(-1)), ner_labels.view(-1))
+                        print(batch_loss, det_loss)
                         batch_loss = batch_loss + (extra_args.auxilliary_task_decay * det_loss)
                         # print('detection_pred', ner_batch_preds.shape, ner_labels.shape, det_loss, batch_loss)
 
@@ -291,9 +292,9 @@ def train(model, detection_model, mlm_args, train_data, eval_data, train_args, e
                                                                      add_marker_tokens=extra_args.add_marker_tokens,
                                                                      prompt_conditioning=False)
 
-                        if extra_args.add_marker_tokens:
-                            labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
-                            ner_labels = torch.cat((ner_labels[:, :1], ner_labels[:, 2:]), axis=1)
+                        # if extra_args.add_marker_tokens:
+                        #     labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
+                        #     ner_labels = torch.cat((ner_labels[:, :1], ner_labels[:, 2:]), axis=1)
 
                         batch_loss = mlm_criterion(batch_probs_preds.view(-1, batch_probs_preds.size(-1)), labels.view(-1))
                         if extra_args.detection_loss:
@@ -303,7 +304,6 @@ def train(model, detection_model, mlm_args, train_data, eval_data, train_args, e
                         eval_loss.append(float(batch_loss))
 
                 eval_epoch_loss = np.mean(eval_loss)
-                logging.info("Epoch {}: Evaluation loss: {}".format(epoch + 1, np.round(eval_epoch_loss, 4)))
 
                 try:
                     eval_perplexity = math.exp(eval_epoch_loss)
@@ -322,7 +322,16 @@ def train(model, detection_model, mlm_args, train_data, eval_data, train_args, e
 
                 if np.round(train_perplexity,1) <= 1.0:
                     break
+            loss_metrics['epochs'] = [i + 1 for i in range(int(train_args.num_train_epochs))]
+            log_metrics = pd.DataFrame(loss_metrics)
             l.close()
+
+            if train_args.output_dir is not None:
+                accelerator.wait_for_everyone()
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.save_pretrained(train_args.output_dir, save_function=accelerator.save)
+                if accelerator.is_main_process:
+                    tokenizer.save_pretrained(train_args.output_dir)
 
 def pad_tensor(ts):
     pass
@@ -633,7 +642,7 @@ def main(args):
                 lst[i].insert(1, special_tokens_ids[v])
         return lst
 
-    def optimization():
+    def optimization(detection_model):
         weights = []
         for n, p in model.named_parameters():
             parameter_modified = False
@@ -658,6 +667,37 @@ def main(args):
             data.append(ed)
             data_labels.append(edl)
         return data, data_labels
+
+    #count the number of prompt per type or template
+    def count_raw_prompt_types(data):
+        r = {}
+        n = 0
+        for i in data:
+            x = PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=i['input_ids'])
+            x_ = x[1].strip('[]').lower()
+            if x_ in r:
+                r[x_] += 1
+            else:
+                r[x_] = 1
+        return r
+
+    #extract prefic prompts from file
+    def ectract_prefix_prompts(source_file, output_file):
+        with open(extra_args.data+'/'+source_file) as p, open(extra_args.data+'/prefix.txt', 'w') as pr:
+            l,k = [],[]
+            for i in p.readlines():
+                if i == '\n':
+                    k_copy = k.copy()
+                    if k_copy[-1].split()[-1].strip() != 'O':
+                        l.append(k_copy)
+                        for t in k_copy:
+                            pr.write(t)
+                            pr.write('\n')
+                        pr.write('\n')
+                    if k:
+                        k.clear()
+                else:
+                    k.append(i.strip())
 
     #tokenise and prepare dataset for training
     if train_args.do_train:
@@ -754,10 +794,10 @@ def main(args):
 
     #fill in masked tokens
     if extra_args.do_fill:
-        #data should be a file in which we intend to fill in unknown of a prompt
+        # data should be a file in which we intend to fill in unknown of a prompt
         eval_model = AutoModelForMaskedLM.from_pretrained(extra_args.pretrained_model)
         # eval_data, eval_data_labels = prepare_data.read_outcome_data_to_sentences(extra_args.data + '/dev.txt')
-        data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data])
+        data = load_dataset('ebm-comet-data.py', data_files=[extra_args.data + '/dev.txt'])
         eval_data, eval_data_labels = extract_examples_and_labels(data['dev'])
         evaluate(data=eval_data, labels=eval_data_labels, train_args=train_args, model=eval_model, tokenizer=tokenizer)
 

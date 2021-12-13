@@ -25,7 +25,7 @@ class prompt_model(BasicModule):
         self.tokenizer = tokenizer
         self.vocab = self.tokenizer.get_vocab()
         self.fcl = nn.Linear(hdim, hdim)
-        self.norm = nn.LayerNorm(hdim, 1e-12)
+        self.norm = nn.LayerNorm(hdim, eps=1e-12)
         self.output = nn.Linear(hdim, len(self.vocab), bias=False)
         self.bias = nn.Parameter(torch.zeros(len(self.vocab)))
         self.output.bias = self.bias
@@ -93,7 +93,7 @@ class prompt_model(BasicModule):
     def add_marker_token_embeddings(self, batch_hidden_output, batch_prompt_types):
         #'[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]'
         batch_size, seq_length, hidden_dimension = batch_hidden_output.size()
-        marker_token_hidden = torch.zeros(batch_size, seq_length, hidden_dimension)
+        marker_token_hidden = torch.zeros(batch_size, seq_length+1, hidden_dimension)
         for i in range(batch_hidden_output.size(0)):
             if batch_prompt_types[i] == 'prefix':
                 x = 0
@@ -105,8 +105,10 @@ class prompt_model(BasicModule):
                 x = 3
             if batch_prompt_types[i] == 'null':
                 x = 4
-            h = batch_hidden_output[i] + self.marker_tokens[x]
-            # h = torch.cat([self.marker_tokens[x], batch_hidden_output[i]], dim=0)
+            # print(batch_prompt_types[i], batch_hidden_output[i].shape, self.marker_tokens.weight[x].shape)
+            h = torch.cat([self.marker_tokens.weight[x].unsqueeze(0), batch_hidden_output[i]], dim=0)
+            # h = torch.add(batch_hidden_output[i], self.marker_tokens.weight[x].unsqueeze(0))
+            # print(h.shape)
             marker_token_hidden[i] = h
         return marker_token_hidden
 
@@ -117,7 +119,7 @@ class prompt_model(BasicModule):
             attention_mask = torch.cat((attention_mask[:, :1], attention_mask[:, 2:]), axis=1)
             labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
             hidd = self.prepare_embeddings(input_ids, attention_mask, labels, layer)
-            hidd = self.add_marker_token_embeddings(batch_hidden_output=hidd, batch_prompt_types=batch_prompt_types)
+            hidd = self.add_marker_token_embeddings(batch_hidden_output=hidd, batch_prompt_types=batch_prompt_types).to(device)
         else:
             hidd = self.prepare_embeddings(input_ids, attention_mask, labels, layer)
         if prompt_conditioning:

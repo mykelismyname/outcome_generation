@@ -47,7 +47,7 @@ def oldcustomMask(tokenizer, tokenized_input, dataset, dataset_labels, model):
     tokenized_input['input_ids'] = inpt_ids
     return tokenized_input
 
-def customMask(tokenized_input, tokenizer, labels_list, mask=False):
+def customMask(tokenized_input, tokenizer, labels_list, mask_id, mask=False):
     custom_mask = mask
     if custom_mask:
         print('\n\n---------------CUSTOM MASKING-------------------------\n\n')
@@ -67,27 +67,33 @@ def customMask(tokenized_input, tokenizer, labels_list, mask=False):
                         outcome_tok_ids = [tok for tok in tokenizer.encode(outcome) if
                                            tok not in tokenizer.all_special_ids]
                         indices_to_mask.append(outcome_tok_ids)
-                        seq_ids = replace_id_with_mask_id(outcome_tok_ids, 103, seq_ids, expand=True)
+                        seq_ids = replace_id_with_mask_id(outcome_tok_ids, mask_id, seq_ids, expand=True)
                 except:
                     raise ValueError('Outcome exists but not identified')
             elif len(seq_outcomes) == 0 and any(k in unique_labels_list for k in token_labels):
-                print(tokens, token_labels)
+                print(tokens, '\n', token_labels, '\n', seq_outcomes)
                 raise ValueError('Outcome exists but not identified')
             final_seq_ids_lens = len(seq_ids)
             assert initial_seq_ids_lens == final_seq_ids_lens == len(j['ner_labels']) \
-                   == len(j['attention_mask']) == len(j['labels']) == len(j['token_type_ids']), \
+                   == len(j['attention_mask']) == len(j['labels']), \
                    "\n-----------------SOMETHING IS WRONG, CHECK OUT THE LENGTH OF THE TENSORS---------------\n"
             input_ids.append(seq_ids)
         tokenized_input_ = tokenized_input.remove_columns('input_ids')
         tokenized_input_ = tokenized_input_.add_column(name='input_ids', column=input_ids)
+
         n = 0
-        for i,j in zip(tokenized_input,tokenized_input_):
-            if n < 5:
-                print(i['input_ids'])
-                print(j['input_ids'])
+        print(type(tokenized_input_))
+        for i, j in zip(tokenized_input, tokenized_input_):
+            if n < 1:
+                print([PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=[i for i in j['input_ids'] if i != tokenizer.pad_token_id])], len(j['input_ids']))
             n += 1
         return tokenized_input_
     else:
+        for n,j in enumerate(tokenized_input):
+            if n < 1:
+                print([PreTrainedTokenizerFast.convert_ids_to_tokens(tokenizer, ids=[i for i in j['input_ids'] if i != tokenizer.pad_token_id])], len(j['input_ids']))
+            n += 1
+        print(type(tokenized_input))
         return tokenized_input
 
 '''
