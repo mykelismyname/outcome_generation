@@ -94,8 +94,8 @@ def read_outcome_data_to_sentences(path):
             else:
                 text.append(' '.join([i for i in sentence]))
                 labels.append((' '.join([i for i in token_labels])))
-                sentence.clear()
-                token_labels.clear()
+                sentence = []
+                token_labels = []
     # print(list(zip(text[:5], labels[:5])))
     return (text, labels)
 
@@ -107,7 +107,6 @@ def outcome_frequency(data, labels):
     print('+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++')
     for x,y in zip(data, labels):
         if any(i in unique_labels for i in y.split()):
-            # print(x,y)
             x_split, y_split = x.split(), y.split()
             if len(x_split) == len(y_split):
                 e = 0
@@ -138,10 +137,10 @@ def outcome_frequency(data, labels):
     outcome_occurence = Counter(outcomes)
     outcome_occurence = dict(sorted(outcome_occurence.items(), key = lambda v:v[1], reverse=True))
     outcome_occurence = dict([[' [SEP] '.join(i for i in k),v] for k,v in outcome_occurence.items()])
-    print(outcome_occurence)
-    with open(args.data+'/outcome_occurrence.json', 'w') as oc:
+    # print(outcome_occurence)
+    with open(args.output_dir+'/outcome_occurrence.json', 'w') as oc:
         json.dump(outcome_occurence, oc, indent=2)
-    print(outcome_occurence)
+    # print(outcome_occurence)
 
 #extract an outcome based on the label
 def identify_outcome_using_label(seq, seq_labels):
@@ -195,7 +194,10 @@ def main(args):
     if args.outcome_frequency:
         #specify the path to the directory with train.txt and dev.txt files i.e. via args.data
         files = [i for i in glob(args.data+'/*.txt') if os.path.basename(i) in ['train.txt', 'dev.txt', 'test.txt']]
-        dataset, dataset_labels, train_samples_len, eval_samples_len, test_samples_len = fetch_data(files)
+        if len(files) > 1:
+            dataset, dataset_labels, train_samples_len, eval_samples_len, test_samples_len = fetch_data(args, files=files)
+        else:
+            dataset, dataset_labels = fetch_data(args, files=[args.data])
         outcome_frequency(data=dataset, labels=dataset_labels)
     if args.create_json:
         data_dir = os.path.abspath(args.data)
@@ -229,12 +231,12 @@ def main(args):
 if __name__ == '__main__':
     par = ArgumentParser()
     par.add_argument('--data', default='data/ebm_comet_multilabels.txt', help='source of data')
+    par.add_argument('--output_dir', help='location to store the date')
     par.add_argument('--correct_dataset', action='store_true', help='move trailing punctuation characters to a new line in the dataset')
+    par.add_argument('--partial_contexts', action='store_true', help='reduces the size of training data by picking only sentences whose outcomes have a particular frequnecu,')
     par.add_argument('--read_outcome_data', action='store_true', help='reading train, test and validation files independently')
     par.add_argument('--outcome_frequency', action='store_true', help='check most frequent outcome and the context around it')
-    par.add_argument('--create_json', action='store_true',
-                     help='preparing json train, test and dev files')
-
+    par.add_argument('--create_json', action='store_true', help='preparing json train, test and dev files')
     args = par.parse_args()
     main(args)
-    check_quartiles(args)
+    # check_quartiles(args)
