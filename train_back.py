@@ -121,12 +121,12 @@ class ExtraArguments:
         metadata={
             "help": "include an auxiliary cross entropy loss for outcome detection"},
     )
-    det_batch_size: Optional[int] = field(
-        default=64,
+    marker_token_emb_size: Optional[int] = field(
+        default=50,
         metadata={
-            "help": "Batch size of the detection model"},
+            "help": "size of randomly initialised embedding to represent marker tokens"},
     )
-    det_hidden_dim: Optional[int] = field(
+    hidden_dim: Optional[int] = field(
         default=768,
         metadata={
             "help": "Hidden state dimension of the detection model"},
@@ -155,8 +155,8 @@ class ExtraArguments:
         default='average',
         metadata={"help": "either select a average of the hidden states across all model layers or select last layer hidden states"}
     )
-    prompt_conditioning: Optional[bool] = field(
-        default=False,
+    prompt_conditioning: Optional[str] = field(
+        default=None,
         metadata={"help": "Trigger an order based attention to create a distributin"}
     )
 
@@ -249,24 +249,22 @@ def train(model, detection_model, mlm_args, train_data, eval_data, train_args, e
                     attention_mask = batch['attention_mask'].to(device)
                     labels = batch['labels'].to(device)
                     ner_labels = batch['ner_labels'].to(device)
-
-                    hidden_output, batch_probs_preds = mlm_model(input_ids=input_ids,
-                                                                 attention_mask=attention_mask,
-                                                                 labels=labels,
-                                                                 layer=extra_args.layers,
-                                                                 add_marker_tokens=extra_args.add_marker_tokens,
-                                                                 prompt_conditioning=False)
+                    hidden_output, batch_mlm_preds, batch_det_probs = mlm_model(input_ids=input_ids,
+                                                                                attention_mask=attention_mask,
+                                                                                label_ids=labels,
+                                                                                layer=extra_args.layers,
+                                                                                add_marker_tokens=extra_args.add_marker_tokens,
+                                                                                detection=extra_args.detection_loss,
+                                                                                prompt_conditioning=args.prompt_conditioning)
                     # print(batch_probs_preds.shape, input_ids.shape, labels.shape)
-                    # if extra_args.add_marker_tokens:
-                    #     labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
-                    #     ner_labels = torch.cat((ner_labels[:, :1], ner_labels[:, 2:]), axis=1)
+                    if extra_args.add_marker_tokens:
+                        labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
+                        ner_labels = torch.cat((ner_labels[:, :1], ner_labels[:, 2:]), axis=1)
 
-                    batch_loss = mlm_criterion(batch_probs_preds.view(-1, batch_probs_preds.size(-1)), labels.view(-1))
+                    batch_loss = mlm_criterion(batch_mlm_preds.view(-1, batch_mlm_preds.size(-1)), labels.view(-1))
                     # print('batch_loss', batch_loss)
                     if extra_args.detection_loss:
-                        ner_batch_preds = detection_model(hidden_output)
-                        det_loss = mlm_criterion(ner_batch_preds.view(-1, ner_batch_preds.size(-1)), ner_labels.view(-1))
-                        print(batch_loss, det_loss)
+                        det_loss = mlm_criterion(batch_det_probs.view(-1, batch_det_probs.size(-1)), ner_labels.view(-1))
                         batch_loss = batch_loss + (extra_args.auxilliary_task_decay * det_loss)
                         # print('detection_pred', ner_batch_preds.shape, ner_labels.shape, det_loss, batch_loss)
 
@@ -285,21 +283,21 @@ def train(model, detection_model, mlm_args, train_data, eval_data, train_args, e
                         labels = batch['labels'].to(device)
                         ner_labels = batch['ner_labels'].to(device)
 
-                        hidden_output, batch_probs_preds = mlm_model(input_ids=input_ids,
-                                                                     attention_mask=attention_mask,
-                                                                     labels=labels,
-                                                                     layer=extra_args.layers,
-                                                                     add_marker_tokens=extra_args.add_marker_tokens,
-                                                                     prompt_conditioning=False)
+                        hidden_output, batch_mlm_preds, batch_det_probs = mlm_model(input_ids=input_ids,
+                                                                                      attention_mask=attention_mask,
+                                                                                      label_ids=labels,
+                                                                                      layer=extra_args.layers,
+                                                                                      add_marker_tokens=extra_args.add_marker_tokens,
+                                                                                      detection=extra_args.detection_loss,
+                                                                                      prompt_conditioning=args.prompt_conditioning if args.prompt_conditioning else None)
 
-                        # if extra_args.add_marker_tokens:
-                        #     labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
-                        #     ner_labels = torch.cat((ner_labels[:, :1], ner_labels[:, 2:]), axis=1)
+                        if extra_args.add_marker_tokens:
+                            labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
+                            ner_labels = torch.cat((ner_labels[:, :1], ner_labels[:, 2:]), axis=1)
 
-                        batch_loss = mlm_criterion(batch_probs_preds.view(-1, batch_probs_preds.size(-1)), labels.view(-1))
+                        batch_loss = mlm_criterion(batch_mlm_preds.view(-1, batch_mlm_preds.size(-1)), labels.view(-1))
                         if extra_args.detection_loss:
-                            ner_batch_preds = detection_model(hidden_output)
-                            det_loss = mlm_criterion(ner_batch_preds.view(-1, ner_batch_preds.size(-1)), ner_labels.view(-1))
+                            det_loss = mlm_criterion(batch_det_probs.view(-1, batch_det_probs.size(-1)), ner_labels.view(-1))
                             batch_loss = batch_loss + (extra_args.auxilliary_task_decay * det_loss)
                         eval_loss.append(float(batch_loss))
 
@@ -318,20 +316,27 @@ def train(model, detection_model, mlm_args, train_data, eval_data, train_args, e
                                                                                                                               eval_perplexity))
                 loss_metrics['training'].append(train_epoch_loss)
                 loss_metrics['val'].append(eval_epoch_loss)
-                l.write('{}.{}\t{}\t{}\t{}\n'.format(epoch+1, np.round(train_epoch_loss, 4), train_perplexity, np.round(eval_epoch_loss, 4), eval_perplexity))
+                l.write('{}-{}\t{}\t{}\t{}\n'.format(epoch+1, np.round(train_epoch_loss, 4), train_perplexity, np.round(eval_epoch_loss, 4), eval_perplexity))
 
-                if np.round(train_perplexity,1) <= 1.0:
+                #early stop
+                loss_increment = loss_metrics['training'][-1] - loss_metrics['training'][-2] if len(loss_metrics['training']) > 1 else 0.1
+                model_file = train_args.output_dir + '/checkpoint_epoch_{}.pt'.format(epoch)
+                if np.round(train_perplexity,1) <= 1.0 or abs(loss_increment) <= 0.0005:
+                    mlm_model.save(model_file)
                     break
-            loss_metrics['epochs'] = [i + 1 for i in range(int(train_args.num_train_epochs))]
+            loss_metrics['epochs'] = [i + 1 for i in range(len(loss_metrics['training']))]
             log_metrics = pd.DataFrame(loss_metrics)
             l.close()
 
             if train_args.output_dir is not None:
                 accelerator.wait_for_everyone()
-                unwrapped_model = accelerator.unwrap_model(model)
-                unwrapped_model.save_pretrained(train_args.output_dir, save_function=accelerator.save)
+                # unwrapped_model = accelerator.unwrap_model(mlm_model)
+                # unwrapped_model.save_pretrained(train_args.output_dir, save_function=accelerator.save)
+                tokenizer_dir = train_args.output_dir+'/tokenizer'
+                if not os.path.exists(tokenizer_dir):
+                    os.makedirs(tokenizer_dir)
                 if accelerator.is_main_process:
-                    tokenizer.save_pretrained(train_args.output_dir)
+                    tokenizer.save_pretrained(tokenizer_dir)
 
 def pad_tensor(ts):
     pass
@@ -579,8 +584,10 @@ def main(args):
         """
         k = []
         input_ids = instance['input_ids']
-        special_tokens = tokenizer.additional_special_tokens
-        special_tokens_ids = tokenizer.additional_special_tokens_ids
+        # special_tokens = tokenizer.additional_special_tokens
+        # special_tokens_ids = tokenizer.additional_special_tokens_ids
+        special_tokens = ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']
+        special_tokens_ids = [tokenizer.vocab_size+i for i in range(1, len(special_tokens)+1)]
         instance_len = len(instance['ner_tags'])
 
         #check where outcomes are within the prompt
@@ -714,12 +721,13 @@ def main(args):
 
         # expand tokenizer vocabularly
         if extra_args.add_marker_tokens:
-            special_tokens = {'additional_special_tokens': ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']}
-            num_added_toks = tokenizer.add_special_tokens(special_tokens)
-            model.resize_token_embeddings(len(tokenizer))
+            special_tokens = ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']
+            special_ids = [tokenizer.vocab_size + i for i in range(1, len(special_tokens) + 1)]
+            special_token_ids = dict(zip(special_tokens, special_ids))
+            # num_added_toks = tokenizer.add_special_tokens(special_tokens)
+            # model.resize_token_embeddings(len(tokenizer))
             # prompt engineering
             train_data = train_data.map(add_marker_tokens)
-            max_seq_length = max_seq_length + 1
             for i, j in enumerate(train_data):
                 if i < 1:
                     print(j)
@@ -769,18 +777,34 @@ def main(args):
         label_to_id[label_ids[-1]+1] = -100
         mlm_criterion = torch.nn.CrossEntropyLoss()
         mlm_model = prompt_model.prompt_model(model=model,
-                                              batch_size=extra_args.det_batch_size,
-                                              hdim=extra_args.det_hidden_dim,
-                                              tokenizer=tokenizer).to(device)
+                                              special_token_ids=special_token_ids if args.add_marker_tokens else None,
+                                              hdim=extra_args.hidden_dim,
+                                              tokenizer=tokenizer,
+                                              seq_length=max_seq_length,
+                                              add_marker_tokens = args.add_marker_tokens,
+                                              marker_token_emb_size=extra_args.marker_token_emb_size,
+                                              ner_label_ids=label_to_id).to(device)
 
-        det_model = detection.outcome_detection_model(hdim=extra_args.det_hidden_dim,
+        det_model = detection.outcome_detection_model(args=extra_args,
+                                                      hdim=extra_args.hidden_dim,
                                                       ner_label_ids=label_to_id)
 
         print(len(tokenizer.get_vocab()), tokenizer.vocab_size)
         mlm_model.to(device)
         det_model.to(device)
-        combined_params = list(mlm_model.parameters()) + list(det_model.parameters()) if extra_args.detection_loss else list(mlm_model.parameters())
-        optim = torch.optim.Adam(combined_params, lr=train_args.learning_rate)
+        # combined_params = list(mlm_model.parameters())
+        no_decay = ["bias", "LayerNorm.weight"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in mlm_model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "weight_decay": train_args.weight_decay,
+            },
+            {
+                "params": [p for n, p in mlm_model.named_parameters() if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
+        optim = AdamW(list(mlm_model.parameters()), lr=train_args.learning_rate)
         mlm_args = (mlm_model, mlm_criterion, optim)
 
         train(model=model,
@@ -834,12 +858,12 @@ if __name__ == '__main__':
     par.add_argument('--trainer_api', action='store_true', help='use the trainer api')
     par.add_argument('--detection_loss', action='store_true', help='include an auxiliary cross entropy loss for outcome detection')
     par.add_argument('--layers', default='average', help='either select a average of the hidden states across all model layers or select last layer hidden states')
-    par.add_argument('--det_batch_size', default=64, help='Batch size of the detection model')
-    par.add_argument('--det_hidden_dim', default=768, help='Hidden state dimension of the detection model')
+    par.add_argument('--marker_token_emb_size', default=50, help='Batch size of the detection model')
+    par.add_argument('--hidden_dim', default=768, help='Hidden state dimension of the detection model')
     par.add_argument('--auxilliary_task_decay', default=0.001, help='Decay the auxilliary loss during training')
     par.add_argument('--alm', action='store_true', help='amalgamate auto-regressive model hidden states')
     par.add_argument('--add_marker_tokens', action='store_true', help='Trigger the f_prompt  function to insert marker tokens at start of prompt')
-    par.add_argument('--prompt_conditioning', action='store_true', help='Trigger an order based attention to create a distributin')
+    par.add_argument('--prompt_conditioning', default=None, help='Trigger an order based attention to create a distributin')
     par.add_argument('--evaluation_strategy', default='steps', help='The evaluation strategy to adopt during training')
     par.add_argument('--label_all_tokens', action='store_true', help='opt to label all tokens or not after tokenization')
     par.add_argument('--partial_contexts', action='store_true', help='train mlm with prompts having different contexts, where contexts refers to prompts of different freq occurence')
