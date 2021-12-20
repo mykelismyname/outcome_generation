@@ -8,6 +8,7 @@ import re
 from argparse import ArgumentParser
 from collections import Counter
 import json
+import torch
 from glob import glob
 
 #fetch the data
@@ -174,7 +175,108 @@ def create_directory(name=''):
         os.makedirs(_dir)
     return _dir
 
-#
+# extract examples and labels from a dataset split (train, dev or test)
+def extract_examples_and_labels(dataset):
+    data, data_labels = [], []
+    id2label = dict([(m, n) for m, n in enumerate(dataset.features['ner_tags'].feature.names)])
+    for j in range(dataset.num_rows):
+        ed = ' '.join(dataset['tokens'][j])
+        edl = ' '.join([id2label[i] for i in dataset['ner_tags'][j]])
+        data.append(ed)
+        data_labels.append(edl)
+    return data, data_labels
+
+#create relative position ids for masked position in prompts
+def create_position_ids(instance, template, tokenizer):
+    if template in ['prefix', 'postfix', 'cloze']:
+        mask_indices = [i for i,j in enumerate(instance['input_ids']) if j == tokenizer.mask_token_id]
+        position_ids, u = [], 1
+        for i,j in enumerate(instance['input_ids']):
+            if i < mask_indices[0]:
+                position_ids.append(i - mask_indices[0])
+            elif i in mask_indices:
+                position_ids.append(0)
+            else:
+                position_ids.append(u)
+                u += 1
+    else:
+        input_ids = instance['input_ids']
+        mask_indices, v = [], 0
+        for i, j in enumerate(input_ids):
+            if i == v:
+                if j == tokenizer.mask_token_id:
+                    mask = []
+                    v = i
+                    for m,n in enumerate(input_ids[i:]):
+                        if n == tokenizer.mask_token_id:
+                            mask.append(m)
+                            v += 1
+                        else:
+                            v += 1
+                            mask_indices.append(mask)
+                            break
+        position_ids = []
+        for mask_ in mask_indices:
+            pos_ids, u = [], 1
+            for i, j in enumerate(input_ids):
+                if i < mask_[0]:
+                    pos_ids.append(i - mask_[0])
+                elif i in mask_:
+                    pos_ids.append(0)
+                else:
+                    pos_ids.append(u)
+                    u += 1
+            position_ids.append(pos_ids)
+    return position_ids
+
+#create relative position ids for masked position in prompts
+def create_position_ids(input_ids, template, tokenizer):
+    def generate_position_ids_relative_to_mask_pos(input_ids, mask_ids):
+        pos_ids, u = [], 1
+        for i, j in enumerate(input_ids):
+            if i < mask_ids[0]:
+                pos_ids.append(i - mask_ids[0])
+            elif i in mask_ids:
+                pos_ids.append(0)
+            else:
+                pos_ids.append(u)
+                u += 1
+        return pos_ids
+
+    single_mask_prompt = False
+    if template in ['prefix', 'postfix', 'cloze']:
+        mask_indices = [i for i,j in enumerate(input_ids) if j == tokenizer.mask_token_id]
+        position_ids = generate_position_ids_relative_to_mask_pos(input_ids, mask_indices)
+        single_mask_prompt = True
+    else:
+        mask_indices, v = [], 0
+        for i, j in enumerate(input_ids):
+            if i == v:
+                if j == tokenizer.mask_token_id:
+                    mask = []
+                    v = i
+                    for m,n in enumerate(input_ids[i:]):
+                        if n == tokenizer.mask_token_id:
+                            mask.append(m+i)
+                            v += 1
+                        else:
+                            v += 1
+                            mask_indices.append(mask)
+                            break
+                else:
+                    v += 1
+        position_ids = []
+        for mask_ in mask_indices:
+            pos_ids = generate_position_ids_relative_to_mask_pos(input_ids, mask_)
+            position_ids.append(pos_ids)
+    return position_ids, single_mask_prompt
+
+#map negative and positive positions to absolute position ids in
+def map_pos_neg_ids(ids, seq_length):
+    possible_ids = list(range(-seq_length, seq_length, 1))
+    mapped_ids = dict([(possible_ids[i], i) for i in range(len(possible_ids))])
+    return mapped_ids
+
 def check_quartiles(args):
     outcomes_occurrence = json.load(open(args.data+'/outcome_occurrence.json'))
     outcomes_occurrence = {k.split(' [SEP] ')[0].strip().lower(): v for k, v in outcomes_occurrence.items()}
