@@ -271,8 +271,8 @@ def create_position_ids(input_ids, template, tokenizer):
             position_ids.append(pos_ids)
     return position_ids, single_mask_prompt
 
-#map negative and positive positions to absolute position ids in
-def map_pos_neg_ids(ids, seq_length):
+#map negative and positive positions to absolute position ids
+def map_pos_neg_ids(seq_length):
     possible_ids = list(range(-seq_length, seq_length, 1))
     mapped_ids = dict([(possible_ids[i], i) for i in range(len(possible_ids))])
     return mapped_ids
