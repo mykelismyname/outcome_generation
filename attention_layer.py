@@ -25,7 +25,6 @@ class position_attention(nn.Module):
         attention_scores = F.softmax(scores, dim=0)
         return attention_scores
 
-
 def fetch_prompt_conditioned_hidden_states(batch_prompt_types, batch_input_ids, batch_hidd_states, tokenizer, pos_embddings, seq_length, hdim, pos_attn, map_pos_ids):
     prompt_conditioned_outputs = []
     for ins in range(batch_input_ids.size(0)):
@@ -41,13 +40,14 @@ def fetch_prompt_conditioned_hidden_states(batch_prompt_types, batch_input_ids, 
             else:
                 outputs_ = []
                 for ids in pos_ids:
+                    ids = [map_pos_ids[i] for i in ids]
                     pos_ids = torch.tensor(ids)
                     pos_embs = pos_embddings.index_select(0, pos_ids.to(device))
                     pos_aware_attn = pos_attn(input_h_states=batch_hidd_states[ins], pos_features=pos_embs)
                     pos_aware_attn, hidd_states = pos_aware_attn.unsqueeze(1), batch_hidd_states[ins].unsqueeze(-1)
                     output = torch.bmm(hidd_states, pos_aware_attn).view(seq_length, hdim)
                     outputs_.append(output)
-                outputs = torch.mean(torch.stack(outputs_))
+                outputs = torch.mean(torch.stack(outputs_), dim=0)
         else:
             outputs = batch_hidd_states[ins]
         prompt_conditioned_outputs.append(outputs)

@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
+import attention_layer as pos_attn
+import prepare_data
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
@@ -22,7 +24,7 @@ class BasicModule(torch.nn.Module):
 
 
 class prompt_model(BasicModule):
-    def __init__(self, model, special_token_ids, hdim, tokenizer, seq_length, add_marker_tokens, marker_token_emb_size, ner_label_ids, marker_tokens_not_trainable=False):
+    def __init__(self, model, special_token_ids, hdim, tokenizer, seq_length, add_marker_tokens, marker_token_emb_size, ner_label_ids, detection, prompt_conditioning, marker_tokens_not_trainable=False):
         super(prompt_model, self).__init__()
         self.model = model
         self.special_token_ids = special_token_ids
@@ -38,11 +40,23 @@ class prompt_model(BasicModule):
         self.output.bias = self.bias
         self.linear_first = nn.Linear(self.hdim, 200)
         self.linear_second = nn.Parameter(torch.rand(200), requires_grad=True)
-        self.ner_output = nn.Linear(self.hdim, len(ner_label_ids))
+
         if add_marker_tokens:
+            self.add_marker_tokens = add_marker_tokens
             self.marker_tokens = nn.Embedding(len(self.special_token_ids), self.maker_token_emb_size)
         if marker_tokens_not_trainable:
             self.marker_tokens.weight.requires_grad = False
+
+        if detection:
+            self.detection = detection
+            self.ner_output = nn.Linear(self.hdim, len(ner_label_ids))
+
+        if prompt_conditioning:
+            self.prompt_conditioning = prompt_conditioning
+            self.pos_attn = pos_attn.position_attention(self.hdim, 200, 300).to(device)
+            self.pos_emb = nn.Embedding(seq_length*2, 300)
+            self.map_pos_ids = prepare_data.map_pos_neg_ids(self.seq_length)
+
 
     def prepare_embeddings(self, input_ids, attention_mask, labels, layer):
         batch = transformers.BatchEncoding({'input_ids': input_ids, 'attention_mask': attention_mask, 'labels': labels})
@@ -120,17 +134,14 @@ class prompt_model(BasicModule):
                 x = 3
             if batch_prompt_types[i] == 'null':
                 x = 4
-            # print(batch_hidden_output[i].shape, self.marker_tokens.weight[x].shape)
-            marker_token_tensors = self.marker_tokens.weight[x].repeat(seq_length, 1)
+            marker_token_tensors = self.marker_tokens.weight.data[x].repeat(seq_length, 1)
             h = torch.cat([marker_token_tensors, batch_hidden_output[i]], dim=1)
-            # h = torch.add(batch_hidden_output[i], self.marker_tokens.weight[x].unsqueeze(0))
-            # print(h.shape)
             marker_token_hidden[i] = h
         return marker_token_hidden
 
-    def forward(self, input_ids, attention_mask, label_ids, layer='last', add_marker_tokens=False, detection=False, prompt_conditioning=None):
-        if add_marker_tokens:
-            batch_prompt_types = self.prompt_type(input_ids)
+    def forward(self, input_ids, attention_mask, label_ids, layer='last'):
+        batch_prompt_types = self.prompt_type(input_ids)
+        if self.add_marker_tokens:
             input_ids = torch.cat((input_ids[:, :1], input_ids[:, 2:]), axis=1)
             attention_mask = torch.cat((attention_mask[:, :1], attention_mask[:, 2:]), axis=1)
             label_ids = torch.cat((label_ids[:, :1], label_ids[:, 2:]), axis=1)
@@ -138,19 +149,23 @@ class prompt_model(BasicModule):
             hidd = self.add_marker_token_embeddings(batch_hidden_output=hidd, batch_prompt_types=batch_prompt_types).to(device)
         else:
             hidd = self.prepare_embeddings(input_ids, attention_mask, label_ids, layer)
-        if prompt_conditioning:
-            if int(prompt_conditioning) == 1:
-                hidd = self.prompt_conditioning(batch_hidden_output=hidd, batch_prompt_types=batch_prompt_types).to(device)
-            elif int(prompt_conditioning) == 2:
-                batch_prompt_types = self.prompt_type(input_ids)
-                cond_hidd = self.prompt_conditioning(batch_hidden_output=hidd, batch_prompt_types=batch_prompt_types).to(device)
-                hidd = torch.mean(hidd, cond_hidd)
+        if self.prompt_conditioning:
+            prompt_conditioned_outputs = pos_attn.fetch_prompt_conditioned_hidden_states(
+                batch_prompt_types=batch_prompt_types, batch_input_ids=input_ids,
+                batch_hidd_states=hidd, tokenizer=self.tokenizer,
+                pos_embddings=self.pos_emb.weight.data, seq_length=self.seq_length,
+                hdim=self.hdim, pos_attn=self.pos_attn, map_pos_ids=self.map_pos_ids)
+            if self.prompt_conditioning == 1:
+                hidd = prompt_conditioned_outputs
+            elif self.prompt_conditioning == 2:
+                hidd = torch.mean(torch.stack([hidd, prompt_conditioned_outputs]), dim=0)
         actv_hidd = F.gelu(self.fcl(hidd))
         norm_hidd = self.norm(actv_hidd)
         prompt_output = self.output(norm_hidd)
-        if detection:
+        if self.detection:
             ner_output = self.ner_output(norm_hidd)
-            return hidd, prompt_output, ner_output
+            output = (hidd, prompt_output, ner_output)
         else:
-            return hidd, prompt_output, None
+            output = (hidd, prompt_output, None)
+        return output
 
