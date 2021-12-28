@@ -13,13 +13,16 @@ class BasicModule(torch.nn.Module):
         super(BasicModule, self).__init__()
         self.model_name = str(type(self))
 
-    def load(self, path):
-        self.load_state_dict(torch.load(path))
+    def load(self, model_path):
+        checkpt = torch.load(model_path)
+        self.load_state_dict(checkpt['model'])
 
-    def save(self, path=None):
+    def save(self, epoch, path=None):
+        params = {'model':self.state_dict(),
+                  'epoch':epoch}
         if path is None:
             raise ValueError('Please specify the saving road!!!')
-        torch.save(self.state_dict(), path)
+        torch.save(params, path)
         return path
 
 
