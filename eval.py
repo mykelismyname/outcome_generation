@@ -17,10 +17,11 @@ import prepare_data
 import outcome_mask
 from train import Outcome_Dataset
 from torch.utils.data import DataLoader
+import os
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-def fill_evaluation(data, args, model, tokenizer):
+def fill_evaluation(data, original_data, args, model, mlm_model, tokenizer):
     """
         As the model to fill in the unknown e.g. After patients were given Sorafenib, they reported [BLANK].
         Model should fill in the blank e.g. FATIGUE
@@ -28,104 +29,189 @@ def fill_evaluation(data, args, model, tokenizer):
         1/3 for outcome 4, and 3/3 for outcome 4. accuracy will be determined by an average accuracy computed as (1/3 + 2/3 + 1/3 + 3/3)/4 = 1/2
         metric: exact match - For the same example above, exact match accuracy would be 1/4, because only 1 outcome was fully recalled
     """
-
     outcomes = json.load(open(args.mention_frequency, 'r'))
     outcomes = {k.split(' [SEP] ')[0].strip():v for k,v in outcomes.items()}
-    mem_accuracy = {}
-    facts = {}
-    prompt_count = 1
-
+    mem_accuracy, prompt_type_accuracy, facts = {}, {}, {}
+    prompt_count, pos, pre, clo, mix = 1, 0, 0, 0, 0
+    original_data, original_data_labels = original_data
     print('\n\n\n+++++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++++\n\n\n')
-
+    model.eval()
+    l = 0
+    prompt_types = [i.strip() for i in args.prompt_type.split()]
+    model_predictions = []
     for batch in data:
-        print(batch)
-    #     print(text)
-    #     print(labels)
-    #     prompt = {}
-    #     exisiting_outcomes_labels = prepare_data.identify_outcome_using_label(seq=text, seq_labels=labels)
-    #     existing_outcomes = [i[0] for i in exisiting_outcomes_labels]
-    #     prompt['text'] = text
-    #     correct_count = 0
-    #     if existing_outcomes:
-    #         for outcome in existing_outcomes:
-    #             prompt['masked_outcome'] = outcome
-    #             outcome_len = len(outcome.split())
-    #             mask = " ".join(tokenizer.mask_token for i in range(len(outcome.split())))
-    #             masked_text = text.replace(outcome, mask.rstrip())
-    #
-    #             input = tokenizer.encode(masked_text, return_tensors="pt")
-    #             mask_token_index = torch.where(input == tokenizer.mask_token_id)[1]
-    #             logits = model(input).logits
-    #             top_token_predictions = []
-    #             for mask in mask_token_index:
-    #                 mask = torch.unsqueeze(mask, 0)
-    #                 mask_token_logits = logits[0, mask, :]
-    #                 top_tokens = torch.topk(mask_token_logits, 1, dim=1).indices[0].tolist()
-    #                 top_token_predictions.append(top_tokens[0])
-    #             prediction = ' '.join([tokenizer.decode([id]) for id in top_token_predictions])
-    #
-    #             for j,token_id in enumerate(top_token_predictions):
-    #                 masked_text = masked_text.replace(tokenizer.mask_token, tokenizer.decode([token_id]), 1)
-    #
-    #             outcome, prediction = outcome.lower().strip(), prediction.lower().strip()
-    #             masked_text_len = len(masked_text.split())
-    #             if outcomes[outcome] in mem_accuracy:
-    #                 if extra_args.recall_metric == 'partial_match':
-    #                     print(outcome, prediction)
-    #                     T = [a == p for a, p in zip(outcome.split(), prediction.split())]
-    #                     C = np.count_nonzero(T)
-    #                     mem_accuracy[outcomes[outcome]].append(float(C/len(T)))
-    #                 elif extra_args.recall_metric == 'exact_match':
-    #                     if outcome == prediction or outcome in prediction:
-    #                         mem_accuracy[outcomes[outcome]]['Correct'] +=1
-    #                         prompt[str(outcome_len)+'_'+str(masked_text_len)+'_Correct'+'_'+str(correct_count+1)] = masked_text
-    #                     mem_accuracy[outcomes[outcome]]['Total'] += 1
-    #             else:
-    #                 if extra_args.recall_metric == 'partial_match':
-    #                     print(outcome, prediction)
-    #                     T = [a == p for a, p in zip(outcome.split(), prediction.split())]
-    #                     C = np.count_nonzero(T)
-    #                     mem_accuracy[outcomes[outcome]] = [float(C/len(T))]
-    #                 elif extra_args.recall_metric == 'exact_match':
-    #                     mem_accuracy[outcomes[outcome]] = {'Total':1}
-    #                     if outcome == prediction or outcome in prediction:
-    #                         mem_accuracy[outcomes[outcome]]['Correct'] = 1
-    #                         prompt[str(outcome_len)+'_'+str(masked_text_len)+'_Correct'+'_'+str(correct_count+1)] = masked_text
-    #                     else:
-    #                         mem_accuracy[outcomes[outcome]]['Correct'] = 0
-    #             correct_count += 1
-    #     facts[prompt_count] = prompt
-    #     prompt_count += 1
-    # print(mem_accuracy)
-    # eval_dir = prepare_data.create_directory(train_args.output_dir+'/{}'.format(extra_args.recall_metric))
-    # #store_the memorization accuracy
-    # with open(eval_dir+'/mem_accuracy.json', 'w') as mem_acc, \
-    #         open(eval_dir+'/fact_predictions.json', 'w') as fc:
-    #     mem_accuracy_ = {}
-    #     for freq in mem_accuracy:
-    #         if extra_args.recall_metric == 'partial_match':
-    #             mem_accuracy_[freq] = np.mean(mem_accuracy[freq])
-    #         elif extra_args.recall_metric == 'exact_match':
-    #             if mem_accuracy[freq]['Correct'] > 0 and mem_accuracy[freq]['Total'] > 0:
-    #                 mem_accuracy_[freq] = float(mem_accuracy[freq]['Correct']/mem_accuracy[freq]['Total'])
-    #     json.dump(mem_accuracy_, mem_acc, indent=2)
-    #     json.dump(facts, fc, indent=2)
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['labels'].to(device)
+        ner_labels = batch['ner_labels'].to(device)
+        text = original_data[l:l+args.per_device_eval_batch_size]
+        text_labels = original_data_labels[l:l+args.per_device_eval_batch_size]
+        # print(text, text_labels, len(text))
+        prompt_input_ids = input_ids.clone()
+        if args.add_marker_tokens:
+            input_ids = torch.cat((input_ids[:, :1], input_ids[:, 2:]), axis=1)
+            attention_mask = torch.cat((attention_mask[:, :1], attention_mask[:, 2:]), axis=1)
+            labels = torch.cat((labels[:, :1], labels[:, 2:]), axis=1)
+            ner_labels = torch.cat((ner_labels[:, :1], ner_labels[:, 2:]), axis=1)
+
+        input_embs = prepare_embeddings(model=model, input_ids=input_ids, attention_mask=attention_mask, labels=labels, layer=args.layers)
+        hidden_output, batch_mlm_preds, batch_det_probs = mlm_model(input_ids=prompt_input_ids,
+                                                                    input_embs=input_embs)
+
+        print(hidden_output.shape, batch_mlm_preds.shape, input_ids.shape, labels.shape)
+
+        for n in range(batch_mlm_preds.shape[0]):
+            prompt = {}
+            exisiting_outcomes_labels = prepare_data.identify_outcome_using_label(seq=text[n], seq_labels=text_labels[n])
+            existing_outcomes = [i[0] for i in exisiting_outcomes_labels]
+            prompt['text'] = text[n]
+            correct_count = 0
+            if existing_outcomes:
+                print(existing_outcomes)
+                if len(existing_outcomes) == 1:
+                    if text[n].startswith(existing_outcomes[0]):
+                        pos += 1
+                        prompt_type = 'pos'
+                    elif text[n].endswith(existing_outcomes[0]):
+                        pre += 1
+                        prompt_type = 'pre'
+                    else:
+                        clo += 1
+                        prompt_type = 'clo'
+                else:
+                    mix += 1
+                    prompt_type = 'mix'
+                print(prompt_type)
+                if prompt_type in prompt_types:
+                    for outcome in existing_outcomes:
+                        prompt['masked_outcome'] = outcome
+                        outcome_len = len(outcome.split())
+                        mask = " ".join(tokenizer.mask_token for i in range(outcome_len))
+                        masked_text = text[n].replace(outcome, mask.rstrip())
+                        logits = batch_mlm_preds[n].unsqueeze(0)
+                        input = input_ids[n].unsqueeze(0)
+                        mask_token_index = torch.where(input == tokenizer.mask_token_id)[1]
+                        # print(logits.shape)
+                        top_token_predictions = []
+                        for mask in mask_token_index:
+                            # print(mask)
+                            mask = torch.unsqueeze(mask, 0)
+                            mask_token_logits = logits[0, mask, :]
+                            top_tokens = torch.topk(mask_token_logits, 1, dim=1).indices[0].tolist()
+                            # print('top tokens:', top_tokens)
+                            top_token_predictions.append(top_tokens[0])
+                        prediction = ' '.join([tokenizer.decode([id]) for id in top_token_predictions])
+                        # print(prediction)
+                        for j, token_id in enumerate(top_token_predictions):
+                            masked_text = masked_text.replace(tokenizer.mask_token, tokenizer.decode([token_id]), 1)
+                            # print(masked_text)
+                        outcome, prediction = outcome.lower().strip(), prediction.lower().strip()
+                        masked_text_len = len(masked_text.split())
+
+                        if prompt_type in prompt_type_accuracy:
+                            if args.recall_metric == 'partial_match':
+                                print(prompt_type, outcome, prediction)
+                                T = [a == p for a, p in zip(outcome.split(), prediction.split())]
+                                C = np.count_nonzero(T)
+                                prompt_accuracy = float(C / len(T))
+                                prompt_type_accuracy[prompt_type].append(prompt_accuracy)
+                            elif args.recall_metric == 'exact_match':
+                                if outcome == prediction or outcome in prediction:
+                                    prompt_type_accuracy[prompt_type]['Correct'] += 1
+                                prompt_type_accuracy[prompt_type]['Total'] += 1
+                        else:
+                            if args.recall_metric == 'partial_match':
+                                print(prompt_type, outcome, prediction)
+                                T = [a == p for a, p in zip(outcome.split(), prediction.split())]
+                                C = np.count_nonzero(T)
+                                prompt_accuracy = float(C / len(T))
+                                prompt_type_accuracy[prompt_type] = [prompt_accuracy]
+                            elif args.recall_metric == 'exact_match':
+                                prompt_type_accuracy[prompt_type] = {'Total': 1}
+                                if outcome == prediction or outcome in prediction:
+                                    prompt_type_accuracy[prompt_type]['Correct'] = 1
+                                else:
+                                    prompt_type_accuracy[prompt_type]['Correct'] = 0
+
+                        if outcomes[outcome] in mem_accuracy:
+                            if args.recall_metric == 'partial_match':
+                                # print(outcome, prediction)
+                                T = [a == p for a, p in zip(outcome.split(), prediction.split())]
+                                C = np.count_nonzero(T)
+                                mlm_accuracy = float(C / len(T))
+                                mem_accuracy[outcomes[outcome]].append(mlm_accuracy)
+                            elif args.recall_metric == 'exact_match':
+                                if outcome == prediction or outcome in prediction:
+                                    mem_accuracy[outcomes[outcome]]['Correct'] += 1
+                                    prompt[str(outcome_len) + '_' + str(masked_text_len) + '_Correct' + '_' + str(correct_count + 1)] = masked_text
+                                mem_accuracy[outcomes[outcome]]['Total'] += 1
+                        else:
+                            if args.recall_metric == 'partial_match':
+                                T = [a == p for a, p in zip(outcome.split(), prediction.split())]
+                                C = np.count_nonzero(T)
+                                mlm_accuracy = float(C / len(T))
+                                mem_accuracy[outcomes[outcome]] = [mlm_accuracy]
+                            elif args.recall_metric == 'exact_match':
+                                mem_accuracy[outcomes[outcome]] = {'Total': 1}
+                                if outcome == prediction or outcome in prediction:
+                                    mem_accuracy[outcomes[outcome]]['Correct'] = 1
+                                    prompt[str(outcome_len) + '_' + str(masked_text_len) + '_Correct' + '_' + str(correct_count + 1)] = masked_text
+                                else:
+                                    mem_accuracy[outcomes[outcome]]['Correct'] = 0
+                        correct_count += 1
+            facts[prompt_count] = prompt
+            prompt_count += 1
+        l += args.per_device_eval_batch_size
+    print(mem_accuracy)
+    eval_dir = args.output_dir
+    if not os.path.exists(eval_dir):
+        eval_dir = prepare_data.create_directory(eval_dir)
+    eval_dir = prepare_data.create_directory(eval_dir + '/{}'.format(args.recall_metric))
+    # store_the memorization accuracy
+    with open(eval_dir + '/mem_accuracy.json', 'w') as mem_acc, open(eval_dir + '/fact_predictions.json', 'w') as fc, \
+            open(eval_dir + '/prompt_type_accuracy.json', 'w') as pmt_acc:
+        mem_accuracy_ = {}
+        prompt_type_accuracy_ = {}
+        print(prompt_type_accuracy)
+        # print(mem_accuracy)
+        for typ in prompt_type_accuracy:
+            if args.recall_metric == 'partial_match':
+                prompt_type_accuracy_[typ] = np.mean(prompt_type_accuracy[typ])
+                prompt_type_accuracy_[typ + 'count'] = len(prompt_type_accuracy[typ])
+            elif args.recall_metric == 'exact_match':
+                if prompt_type_accuracy[typ]['Correct'] > 0 and prompt_type_accuracy[typ]['Total'] > 0:
+                    prompt_type_accuracy_[typ] = float(
+                        prompt_type_accuracy[typ]['Correct'] / prompt_type_accuracy[typ]['Total'])
+
+        for freq in mem_accuracy:
+            if args.recall_metric == 'partial_match':
+                mem_accuracy_[freq] = np.mean(mem_accuracy[freq])
+            elif args.recall_metric == 'exact_match':
+                if mem_accuracy[freq]['Correct'] > 0 and mem_accuracy[freq]['Total'] > 0:
+                    mem_accuracy_[freq] = float(mem_accuracy[freq]['Correct'] / mem_accuracy[freq]['Total'])
+        json.dump(mem_accuracy_, mem_acc, indent=2)
+        json.dump(prompt_type_accuracy_, pmt_acc, indent=2)
+        json.dump(facts, fc, indent=2)
+    print('Pre:{}, Pos:{}, Clo:{}, Mix:{}'.format(pre, pos, clo, mix))
+
+
+#prepare embeddings
+def prepare_embeddings(model, input_ids, attention_mask, labels, layer):
+    batch = transformers.BatchEncoding({'input_ids': input_ids, 'attention_mask': attention_mask, 'labels': labels})
+    outputs = model(**batch, output_hidden_states=True)
+    mlm_hidden_states = outputs.hidden_states
+    # last layer
+    if layer == 'last':
+        emb = mlm_hidden_states[-1]
+        return emb
+    # average embeddings across all model layers
+    elif layer == 'average':
+        all_layer_hidd = [layer_hidd for layer_hidd in mlm_hidden_states[1:]]
+        all_layer_hidd = torch.stack(all_layer_hidd, dim=0)
+        emb = torch.mean(all_layer_hidd, dim=0)
+        return emb
 
 def main(args):
-    p_model = AutoModelForMaskedLM.from_pretrained(args.pretrained_model)
-    tokenizer = AutoTokenizer.from_pretrained(args.saved_model+'/tokenizer/')
-    data = load_dataset('ebm-comet-data.py', data_files=[args.data])
-    file = 'dev' if args.data.__contains__('dev.txt') else 'train' if args.data.__contains__('train.txt') else args.data
-    column_names = data[file].column_names
-    features = data[file].features
-    text_column_name = "tokens" if "tokens" in column_names else column_names[0]
-    label_column_name = "ner_tags" if "ner_tags" in column_names else column_names[1]
-    label_list = features[label_column_name].feature.names
-    label_to_id = {i: i for i in range(len(label_list))}
-    label_list.append('special_token')
-    label_ids = [x for x, y in label_to_id.items()]
-    label_to_id[label_ids[-1] + 1] = -100
-
     # loading a tokenizer for tokenizing the input
     def tokenize(examples):
         print('\n------------------------------------------label\n', label_list,
@@ -219,53 +305,88 @@ def main(args):
         instance['ner_labels'].insert(1, 0) #the detection label is O i.e. outside of tag hence id is 0
         return instance
 
+    def get_label_list(labels):
+        unique_labels = set()
+        for label in labels:
+            unique_labels = unique_labels | set(label)
+        label_list = list(unique_labels)
+        label_list.sort()
+        return label_list
+
+    # load trained model and tokenizer
+    p_model = AutoModelForMaskedLM.from_pretrained(args.pretrained_model)
+    tokenizer = AutoTokenizer.from_pretrained(args.saved_model + '/tokenizer/')
+
+    # load and preprocess data
+    data = load_dataset('ebm-comet-data.py', data_files=[args.data])
+    file = 'dev' if args.data.__contains__('dev.txt') else 'train' if args.data.__contains__(
+        'train.txt') else args.data
+    extracted_data, extracted_data_labels = prepare_data.extract_examples_and_labels(data[file])
+    column_names = data[file].column_names
+    features = data[file].features
+    text_column_name = "tokens" if "tokens" in column_names else column_names[0]
+    label_column_name = "ner_tags" if "ner_tags" in column_names else column_names[1]
+
+    if isinstance(features[label_column_name].feature, ClassLabel):
+        label_list = features[label_column_name].feature.names
+        label_to_id = {i: i for i in range(len(label_list))}
+    else:
+        data = data[file]
+        label_list = get_label_list(data[label_column_name])
+        label_to_id = {l: i for i, l in enumerate(label_list)}
+    print(label_list)
+    print(label_to_id)
+    max_seq_length = min(args.max_seq_length, tokenizer.model_max_length)
+    print(max_seq_length)
+
     tokenized_input = data.map(tokenize, batched=True, desc="Running tokenizer on eval data")
-    print(tokenized_input)
     tokenized_data = tokenized_input[file]
+    eval_data = outcome_mask.customMask(tokenized_data,
+                                        tokenizer=tokenizer,
+                                        labels_list=label_list,
+                                        mask_id=tokenizer.mask_token_id,
+                                        mask=args.custom_mask)
+    print(tokenized_data)
+    print(eval_data)
+    # expand tokenizer vocabularly
+    if args.add_marker_tokens:
+        special_tokens = ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']
+        special_ids = [tokenizer.vocab_size + i for i in range(1, len(special_tokens) + 1)]
+        special_token_ids = dict(zip(special_tokens, special_ids))
+        eval_data = eval_data.map(add_marker_tokens)
+
+    #add the special ner tag token assigned to mask
+    label_list.append('special_token')
+    label_ids = [x for x, y in label_to_id.items()]
+    label_to_id[label_ids[-1] + 1] = -100
+
+    mlm_model = prompt_model.prompt_model(model=p_model,
+                                          special_token_ids=special_token_ids if args.add_marker_tokens else None,
+                                          hdim=args.hidden_dim,
+                                          tokenizer=tokenizer,
+                                          seq_length=max_seq_length,
+                                          add_marker_tokens=args.add_marker_tokens,
+                                          marker_token_emb_size=args.marker_token_emb_size,
+                                          ner_label_ids=label_to_id,
+                                          detection=args.detection_loss,
+                                          prompt_conditioning=args.prompt_conditioning).to(device)
+
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm_probability=0.15,
+        pad_to_multiple_of=None
+    )
+
+    eval_data = eval_data.remove_columns(['tokens', 'ner_tags'])
     if args.custom_mask:
-        eval_data = outcome_mask.customMask(tokenized_data,
-                                            tokenizer=tokenizer,
-                                            labels_list=label_list,
-                                            mask_id=tokenizer.mask_token_id,
-                                            mask=args.custom_mask)
-    for i in eval_data:
-        print(len(i['input_ids']))
-        break
-    # # expand tokenizer vocabularly
-    # if args.add_marker_tokens:
-    #     special_tokens = ['[prefix]', '[postfix]', '[cloze]', '[mixed]', '[null]']
-    #     special_ids = [tokenizer.vocab_size + i for i in range(1, len(special_tokens) + 1)]
-    #     special_token_ids = dict(zip(special_tokens, special_ids))
-    #     eval_data = eval_data.map(add_marker_tokens)
-    #
-    # data_collator = DataCollatorForLanguageModeling(
-    #     tokenizer=tokenizer,
-    #     mlm_probability=0.15,
-    #     pad_to_multiple_of=None
-    # )
-    #
-    # eval_data = eval_data.remove_columns(['tokens', 'ner_tags'])
-    # if args.custom_mask:
-    #     eval_dataset_dict = transformers.BatchEncoding(Dataset.to_dict(eval_data))
-    #     eval_data = Outcome_Dataset(eval_dataset_dict)
-    #     eval_loader = DataLoader(eval_data, batch_size=args.per_device_eval_batch_size)
-    # else:
-    #     eval_loader = DataLoader(eval_data, batch_size=args.per_device_eval_batch_size, collate_fn=data_collator)
-    #
-    # mlm_model = prompt_model.prompt_model(model=p_model,
-    #                                       special_token_ids=special_token_ids if args.add_marker_tokens else None,
-    #                                       hdim=args.hidden_dim,
-    #                                       tokenizer=tokenizer,
-    #                                       seq_length=args.max_seq_length,
-    #                                       add_marker_tokens=args.add_marker_tokens,
-    #                                       marker_token_emb_size=args.marker_token_emb_size,
-    #                                       ner_label_ids=label_to_ids,
-    #                                       detection=args.detection_loss,
-    #                                       prompt_conditioning=args.prompt_conditioning).to(device)
-    #
-    # mlm_model.load(args.saved_model + '/checkpoint_epoch_1.pt')
-    # # eval_data, eval_data_labels = prepare_data.extract_examples_and_labels(data[i])
-    # fill_evaluation(data=eval_loader, args=args, model=mlm_model, tokenizer=tokenizer)
+        eval_dataset_dict = transformers.BatchEncoding(Dataset.to_dict(eval_data))
+        eval_data = Outcome_Dataset(eval_dataset_dict)
+        eval_loader = DataLoader(eval_data, batch_size=args.per_device_eval_batch_size)
+    else:
+        eval_loader = DataLoader(eval_data, batch_size=args.per_device_eval_batch_size, collate_fn=data_collator)
+
+    mlm_model.load(args.saved_model + '/best_model.pt')
+    fill_evaluation(data=eval_loader, original_data=(extracted_data, extracted_data_labels), args=args, model=p_model,  mlm_model=mlm_model, tokenizer=tokenizer)
 
 if __name__ == '__main__':
     par = ArgumentParser()
@@ -274,16 +395,17 @@ if __name__ == '__main__':
     par.add_argument('--output_dir', default='output', help='indicate where you want model and results to be stored')
     par.add_argument('--pretrained_model', default='bert-base-uncased', help='pre-trained model available via hugging face e.g. dmis-lab/biobert-v1.1')
     par.add_argument('--max_seq_length', default=256, help='Maximum length of a sequence')
-    par.add_argument('--per_device_eval_batch_size', default=16, help='eval batch size')
+    par.add_argument('--per_device_eval_batch_size', default=16, type=int, help='eval batch size')
     par.add_argument('--saved_model', required=True, help='Model fine-tuned on the prompts')
     par.add_argument('--mask_id', default=103, help='id for the special mask token 103-Bert, 50264-Roberta, 104-SciBERT')
     par.add_argument('--custom_mask', action='store_true', help='specify tokens to mask and avoid using the data collator')
     par.add_argument('--mention_frequency', default='outcome_occurrence.json', help='File with the outcome mention frequency.')
-    par.add_argument('--recall_metric', default='exact_match', help='exact_match or partial_matial')
+    par.add_argument('--recall_metric', default='exact_match', type=str, help='exact_match or partial_matial')
     par.add_argument('--detection_loss', action='store_true', help='include an auxiliary cross entropy loss for outcome detection')
     par.add_argument('--layers', default='average', help='either select a average of the hidden states across all model layers or select last layer hidden states')
     par.add_argument('--det_batch_size', default=64, help='Batch size of the detection model')
     par.add_argument('--hidden_dim', default=768, help='Hidden state dimension of the mlm model')
+    par.add_argument('--prompt_type', default='pre', help='which prompt type to evaluate')
     par.add_argument('--add_marker_tokens', action='store_true', help='Trigger the f_prompt  function to insert marker tokens at start of prompt')
     par.add_argument('--marker_token_emb_size', default=50, help='Batch size of the detection model')
     par.add_argument('--prompt_conditioning', default=0, type=int, help='Trigger an order based attention to create a distributin')
