@@ -28,8 +28,8 @@ for condition in "${conditioning[@]}"
 do
   for layer in "${layers[@]}"
     do
-      echo "${save_dir} ${condition} ${layer}"
       save_dir="biobert"
+      echo "${save_dir} ${condition} ${layer}"
       CUDA_AVAILABLE_DEVICES=0,1 \
       python train_back.py \
         --data data/ebm-comet/ \
@@ -49,8 +49,8 @@ for condition in "${conditioning[@]}"
 do
   for layer in "${layers[@]}"
     do
-      echo "${save_dir} ${condition} ${layer}"
       save_dir="umlsbert"
+      echo "${save_dir} ${condition} ${layer}"
       CUDA_AVAILABLE_DEVICES=0,1 \
       python train_back.py \
         --data data/ebm-comet/ \
@@ -70,8 +70,8 @@ for condition in "${conditioning[@]}"
 do
   for layer in "${layers[@]}"
     do
-      echo "${save_dir} ${condition} ${layer}"
       save_dir="roberta"
+      echo "${save_dir} ${condition} ${layer}"
       CUDA_AVAILABLE_DEVICES=0,1 \
       python train_back.py \
         --data data/ebm-comet/ \
@@ -91,8 +91,8 @@ for condition in "${conditioning[@]}"
 do
   for layer in "${layers[@]}"
     do
+      save_dir="scibert"
       echo "${save_dir} ${condition} ${layer}"
-      save_dir="roberta"
       CUDA_AVAILABLE_DEVICES=0,1 \
       python train_back.py \
         --data data/ebm-comet/ \
