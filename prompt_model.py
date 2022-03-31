@@ -43,10 +43,12 @@ class prompt_model(BasicModule):
         self.output.bias = self.bias
         self.linear_first = nn.Linear(self.hdim, 200)
         self.linear_second = nn.Parameter(torch.rand(200), requires_grad=True)
+        self.prompt_conditioning = prompt_conditioning
 
         if add_marker_tokens:
             self.add_marker_tokens = add_marker_tokens
             self.marker_tokens = nn.Embedding(len(self.special_token_ids), self.maker_token_emb_size)
+
         if marker_tokens_not_trainable:
             self.marker_tokens.weight.requires_grad = False
 
@@ -54,10 +56,9 @@ class prompt_model(BasicModule):
             self.detection = detection
             self.ner_output = nn.Linear(self.hdim, len(ner_label_ids))
 
-        if prompt_conditioning:
-            self.prompt_conditioning = prompt_conditioning
+        if self.prompt_conditioning:
             self.pos_attn = pos_attn.position_attention(self.hdim, 200, 300).to(device)
-            self.pos_emb = nn.Embedding(seq_length*2, 300)
+            self.pos_emb = nn.Embedding(self.seq_length*2, 300)
             self.map_pos_ids = prepare_data.map_pos_neg_ids(self.seq_length)
 
 
@@ -84,7 +85,7 @@ class prompt_model(BasicModule):
             batch_prompt_types.append(t.strip('[]'))
         return batch_prompt_types
 
-    def prompt_conditioning(self, batch_hidden_output, batch_prompt_types):
+    def prompt_conditionin(self, batch_hidden_output, batch_prompt_types):
         batch_size, seq_length, hidden_dimension = batch_hidden_output.size()
         batch_condition_hidden = torch.zeros(batch_size, seq_length, hidden_dimension)
 
@@ -142,16 +143,14 @@ class prompt_model(BasicModule):
             marker_token_hidden[i] = h
         return marker_token_hidden
 
-    def forward(self, input_ids, attention_mask, label_ids, layer='last'):
+    def forward(self, input_ids, input_embs):
         batch_prompt_types = self.prompt_type(input_ids)
+        hidd = input_embs
+
         if self.add_marker_tokens:
             input_ids = torch.cat((input_ids[:, :1], input_ids[:, 2:]), axis=1)
-            attention_mask = torch.cat((attention_mask[:, :1], attention_mask[:, 2:]), axis=1)
-            label_ids = torch.cat((label_ids[:, :1], label_ids[:, 2:]), axis=1)
-            hidd = self.prepare_embeddings(input_ids, attention_mask, label_ids, layer)
             hidd = self.add_marker_token_embeddings(batch_hidden_output=hidd, batch_prompt_types=batch_prompt_types).to(device)
-        else:
-            hidd = self.prepare_embeddings(input_ids, attention_mask, label_ids, layer)
+
         if self.prompt_conditioning:
             prompt_conditioned_outputs = pos_attn.fetch_prompt_conditioned_hidden_states(
                 batch_prompt_types=batch_prompt_types, batch_input_ids=input_ids,
