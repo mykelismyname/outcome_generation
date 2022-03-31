@@ -47,6 +47,9 @@ def oldcustomMask(tokenizer, tokenized_input, dataset, dataset_labels, model):
     tokenized_input['input_ids'] = inpt_ids
     return tokenized_input
 
+'''
+    Masking specific tokens of the input dataset 
+'''
 def customMask(tokenized_input, tokenizer, labels_list, mask_id, mask=False):
     custom_mask = mask
     if custom_mask:
