@@ -1,4 +1,4 @@
-#Position based prompting
+# Position based prompting
 
 **Identify exisiting outcomes based on the inherent labels and count how often each identified outcome appears in the data**
 
