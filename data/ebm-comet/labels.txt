@@ -1,0 +1,11 @@
+B-Adverse-effects
+B-Life-Impact
+B-Mortality
+B-Physiological-Clinical
+B-Resource-use
+I-Adverse-effects
+I-Life-Impact
+I-Mortality
+I-Physiological-Clinical
+I-Resource-use
+O
