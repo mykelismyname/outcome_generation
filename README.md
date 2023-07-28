@@ -24,3 +24,13 @@
 - detection loss - Cross entropy loss for token level classification
 
 - add_marker tokens - aimed to incorporate prompt template pattern or type
+
+
+## Citation
+```
+@article{abaho2022position,
+  title={Position-based Prompting for Health Outcome Generation},
+  author={Abaho, Micheal and Bollegala, Danushka and Williamson, Paula and Dodd, Susanna},
+  journal={arXiv preprint arXiv:2204.03489},
+  year={2022}
+}
